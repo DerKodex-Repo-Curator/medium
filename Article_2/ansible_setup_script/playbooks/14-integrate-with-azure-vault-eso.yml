@@ -1,0 +1,175 @@
+- name: Install External Secrets Operator
+  hosts: masters[0]
+  become: true
+  remote_user: cloud
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+
+    ############################################################
+    # Namespace
+    ############################################################
+
+    - name: Create ESO namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ eso_namespace }}"
+
+    ############################################################
+    # Helm repo
+    ############################################################
+
+    - name: Add External Secrets Helm repo
+      kubernetes.core.helm_repository:
+        name: external-secrets
+        repo_url: https://charts.external-secrets.io
+
+    ############################################################
+    # Install ESO
+    ############################################################
+
+    - name: Install External Secrets Operator
+      kubernetes.core.helm:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        name: external-secrets
+        chart_ref: external-secrets/external-secrets
+        chart_version: "{{ eso_chart_version }}"
+        release_namespace: "{{ eso_namespace }}"
+        create_namespace: true
+        wait: true
+        update_repo_cache: true
+        values:
+          installCRDs: true
+
+    ############################################################
+    # Wait for CRDs
+    ############################################################
+
+    - name: Wait for ClusterSecretStore CRD
+      command: >
+        {{ rke2_kubectl }} get crd clustersecretstores.external-secrets.io
+      register: crd_result
+      retries: 30
+      delay: 10
+      changed_when: false
+      until: crd_result.rc == 0
+
+    - name: Wait for ClusterSecretStore API registration
+      command: >
+        {{ rke2_kubectl }} api-resources
+      register: api_resources
+      retries: 30
+      delay: 5
+      changed_when: false
+      until: "'clustersecretstores' in api_resources.stdout"
+
+    ############################################################
+    # Azure SP bootstrap Secret
+    ############################################################
+
+    - name: Create Azure authentication secret
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: azure-kv-auth
+            namespace: "{{ eso_namespace }}"
+          type: Opaque
+          stringData:
+            ClientID: "{{ azure_eso_client_id }}"
+            ClientSecret: "{{ azure_eso_client_secret }}"
+
+    ############################################################
+    # ClusterSecretStore
+    ############################################################
+
+    - name: Create Azure Key Vault ClusterSecretStore
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: external-secrets.io/v1
+          kind: ClusterSecretStore
+          metadata:
+            name: azure-kv
+          spec:
+            provider:
+              azurekv:
+                tenantId: "{{ azure_tenant_id }}"
+                vaultUrl: "https://{{ azure_keyvault_name }}.vault.azure.net/"
+
+                authSecretRef:
+                  clientId:
+                    name: azure-kv-auth
+                    namespace: "{{ eso_namespace }}"
+                    key: ClientID
+
+                  clientSecret:
+                    name: azure-kv-auth
+                    namespace: "{{ eso_namespace }}"
+                    key: ClientSecret
+
+    ############################################################
+    # Wait for ESO deployment
+    ############################################################
+
+    - name: Wait for ESO deployment
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ eso_namespace }}"
+        name: external-secrets
+      register: eso_status
+      retries: 30
+      delay: 10
+      until: >
+        eso_status.resources | length > 0 and
+        eso_status.resources[0].status.availableReplicas | default(0) | int > 0
+
+    ############################################################
+    # Verify ClusterSecretStore
+    ############################################################
+
+    - name: Verify ClusterSecretStore
+      command: >
+        {{ rke2_kubectl }} get clustersecretstore azure-kv -o yaml
+      register: css_verify
+      changed_when: false
+
+    - name: Display ClusterSecretStore
+      debug:
+        var: css_verify.stdout
+
+    ############################################################
+    # Show ESO version
+    ############################################################
+
+    - name: Get ESO deployment
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ eso_namespace }}"
+        name: external-secrets
+      register: eso_deployment
+
+    - name: Display ESO image version
+      debug:
+        msg: >
+          ESO image:
+          {{
+            eso_deployment.resources[0].spec.template.spec.containers[0].image
+          }}

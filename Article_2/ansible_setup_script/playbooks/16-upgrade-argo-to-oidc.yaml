@@ -1,0 +1,251 @@
+- name: Install Argo CD with ESO-backed secrets, LDAP, Reloader and GitOps bootstrap
+  hosts: masters[0]
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    argocd_manifest_url: >-
+      https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
+
+    # External Secrets
+    eso_cluster_secret_store_name: azure-kv
+
+    # Azure Key Vault secret names
+    akv_argocd_admin_password_key: argocd-admin-password-bcrypthash
+
+    akv_gitlab_username_key: argocd-gitlab-username
+    akv_gitlab_token_key: argocd-gitlab-token
+
+    akv_authentik_client_id_key: argocd-authentik-client-id
+    akv_authentik_client_secret_key: argocd-authentik-client-secret
+
+  tasks:
+
+    ###########################################################################
+    # Pre-flight checks
+    ###########################################################################
+
+    - name: Check ExternalSecret CRD exists
+      command: kubectl get crd externalsecrets.external-secrets.io
+      changed_when: false
+
+    - name: Check ClusterSecretStore exists
+      command: >
+        kubectl get clustersecretstore.external-secrets.io
+        {{ eso_cluster_secret_store_name }}
+      changed_when: false
+
+    ###########################################################################
+    # Namespace
+    ###########################################################################
+
+    - name: Ensure Argo CD namespace exists
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ argocd_namespace }}"
+    ###########################################################################
+    # ExternalSecret: argocd-secret
+    #
+    # This merges values into the existing upstream argocd-secret.
+    # Secrets come only from Azure Key Vault.
+    ###########################################################################
+
+    - name: Create ExternalSecret for argocd-secret
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: external-secrets.io/v1
+          kind: ExternalSecret
+          metadata:
+            name: argocd-secret
+            namespace: "{{ argocd_namespace }}"
+          spec:
+            refreshInterval: 5m
+
+            secretStoreRef:
+              kind: ClusterSecretStore
+              name: "{{ eso_cluster_secret_store_name }}"
+
+            target:
+              name: argocd-secret
+              creationPolicy: Merge
+
+            data:
+              - secretKey: dex.ldap.bindDN
+                remoteRef:
+                  key: "{{ akv_ldap_bind_dn_key }}"
+
+              - secretKey: dex.ldap.bindPW
+                remoteRef:
+                  key: "{{ akv_ldap_bind_password_key }}"
+
+              - secretKey: admin.password
+                remoteRef:
+                  key: "{{ akv_argocd_admin_password_key }}"
+
+              - secretKey: dex.authentik.clientId
+                remoteRef:
+                  key: "{{ akv_authentik_client_id_key }}"
+
+              - secretKey: dex.authentik.clientSecret
+                remoteRef:
+                  key: "{{ akv_authentik_client_secret_key }}"
+
+    - name: Configure Argo CD URL and Dex LDAP connector
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: argocd-cm
+            namespace: "{{ argocd_namespace }}"
+          data:
+            url: "https://{{ argocd_hostname }}"
+            admin.enabled: "true"
+            sso.autoRedirect: "false"
+            dex.config: |
+              connectors:
+              - type: oidc
+
+                id: authentik
+                name: Authentik
+
+                config:
+                  issuer: https://auth.<your_domain>.pl/application/o/argocd-dex/
+
+                  clientID: $dex.authentik.clientId
+                  clientSecret: $dex.authentik.clientSecret
+
+                  insecureEnableGroups: true
+
+                  scopes:
+                    - openid
+                    - profile
+                    - email
+                    - groups
+
+    - name: Configure Argo CD RBAC
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: argocd-rbac-cm
+            namespace: "{{ argocd_namespace }}"
+          data:
+            policy.default: role:readonly
+
+            scopes: '[groups,email]'
+
+
+            policy.csv: |
+
+              # ==========================================
+              # Global
+              # ==========================================
+              g, argocd-root-admins, role:admin
+
+              g, argocd-readonly, role:readonly
+
+              # ==========================================
+              # Applications
+              # ==========================================
+
+              g, argocd-apps-admins, role:apps-admin
+
+              p, role:apps-admin, applications, get, apps/*, allow
+              p, role:apps-admin, applications, sync, apps/*, allow
+              p, role:apps-admin, applications, action/*, apps/*, allow
+              p, role:apps-admin, logs, get, apps/*, allow
+
+              # ==========================================
+              # Platform
+              # ==========================================
+
+              g, argocd-platform-admins, role:platform-admin
+
+              p, role:platform-admin, applications, get, platform/*, allow
+              p, role:platform-admin, applications, sync, platform/*, allow
+              p, role:platform-admin, applications, action/*, platform/*, allow
+              p, role:platform-admin, logs, get, platform/*, allow
+
+              # ==========================================
+              # Infrastructure
+              # ==========================================
+
+              g, argocd-infra-admins, role:infra-admin
+
+              p, role:infra-admin, applications, get, infra/*, allow
+              p, role:infra-admin, applications, sync, infra/*, allow
+              p, role:infra-admin, applications, action/*, infra/*, allow
+              p, role:infra-admin, logs, get, infra/*, allow
+
+              # ==========================================
+              # Monitoring
+              # ==========================================
+
+              g, argocd-monitoring-admins, role:monitoring-admin
+
+              p, role:monitoring-admin, applications, get, monitoring/*, allow
+              p, role:monitoring-admin, applications, sync, monitoring/*, allow
+              p, role:monitoring-admin, applications, action/*, monitoring/*, allow
+              p, role:monitoring-admin, logs, get, monitoring/*, allow
+
+              # ==========================================
+              # Learning
+              # ==========================================
+
+              g, argocd-learning-admins, role:learning-admin
+
+              p, role:learning-admin, applications, get, learning/*, allow
+              p, role:learning-admin, applications, sync, learning/*, allow
+              p, role:learning-admin, applications, action/*, learning/*, allow
+              p, role:learning-admin, logs, get, learning/*, allow
+
+
+
+    ###########################################################################
+    # Restart ArgoCD after Dex/Auth changes
+    ###########################################################################
+
+    - name: Restart argocd-dex-server
+      command: >
+        kubectl -n {{ argocd_namespace }}
+        rollout restart deployment/argocd-dex-server
+      changed_when: true
+
+    - name: Wait for argocd-dex-server rollout
+      command: >
+        kubectl -n {{ argocd_namespace }}
+        rollout status deployment/argocd-dex-server
+        --timeout=300s
+      changed_when: false
+
+    - name: Restart argocd-server
+      command: >
+        kubectl -n {{ argocd_namespace }}
+        rollout restart deployment/argocd-server
+      changed_when: true
+
+    - name: Wait for argocd-server rollout
+      command: >
+        kubectl -n {{ argocd_namespace }}
+        rollout status deployment/argocd-server
+        --timeout=300s
+      changed_when: false
+
+ 
+

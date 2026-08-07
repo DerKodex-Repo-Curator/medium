@@ -1,0 +1,152 @@
+
+- name: Enforce static DNS (disable systemd-resolved, use public resolvers)
+  hosts: all
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    # ----------------------------
+    # Stop and disable systemd-resolved
+    # ----------------------------
+    - name: Stop and disable systemd-resolved
+      systemd:
+        name: systemd-resolved
+        state: stopped
+        enabled: false
+
+    # ----------------------------
+    # Remove resolv.conf symlink if present
+    # ----------------------------
+    - name: Remove /etc/resolv.conf symlink
+      file:
+        path: /etc/resolv.conf
+        state: absent
+
+    # ----------------------------
+    # Create static /etc/resolv.conf
+    # ----------------------------
+    - name: Create static /etc/resolv.conf
+      copy:
+        dest: /etc/resolv.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          {% for ns in dns_nameservers %}
+          nameserver {{ ns }}
+          {% endfor %}
+
+
+- name: Enforce CoreDNS upstream DNS and IPv4 preference (RKE2)
+  hosts: masters
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    coredns_configmap: rke2-coredns-rke2-coredns
+    coredns_namespace: kube-system
+
+  tasks:
+    - name: Apply CoreDNS ConfigMap with explicit upstream and prefer_ipv4
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/rke2/rke2.yaml
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: "{{ coredns_configmap }}"
+            namespace: "{{ coredns_namespace }}"
+          data:
+            Corefile: |
+              .:53 {
+                  errors
+                  health {
+                      lameduck 10s
+                  }
+                  ready
+                  kubernetes cluster.local in-addr.arpa ip6.arpa {
+                      pods insecure
+                      fallthrough in-addr.arpa ip6.arpa
+                      ttl 30
+                  }
+                  prometheus 0.0.0.0:9153
+                  
+                  forward . 1.1.1.1 8.8.8.8 {
+                      force_tcp
+                  }
+
+                  cache 30
+                  loop
+                  reload
+                  loadbalance
+              }
+
+    - name: Restart CoreDNS pods by deleting them
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/rke2/rke2.yaml
+        kind: Pod
+        namespace: kube-system
+        label_selectors:
+          - k8s-app=kube-dns
+        state: absent
+
+    - name: Configure containerd registry mirrors (RKE2)
+      ansible.builtin.copy:
+        dest: /etc/rancher/rke2/registries.yaml
+        mode: '0644'
+        content: |
+          mirrors:
+            docker.io:
+              endpoint:
+                - "https://registry-1.docker.io"
+
+            quay.io:
+              endpoint:
+                - "https://quay.io"
+
+            ghcr.io:
+              endpoint:
+                - "https://ghcr.io"
+
+            registry.k8s.io:
+              endpoint:
+                - "https://registry.k8s.io"
+
+          configs: {}
+
+    - name: Ensure CA certificates are installed
+      ansible.builtin.package:
+        name: ca-certificates
+        state: present
+
+    - name: Update CA certificates
+      ansible.builtin.command: update-ca-certificates
+      changed_when: false
+
+    - name: Restart rke2-server
+      systemd:
+        name: rke2-server
+        state: restarted
+    
+
+- name: Restart RKE2 agents (workers)
+  vars_files:
+    - ../group_vars/all.yml
+  hosts: workers
+  become: true
+
+  tasks:
+    - name: Restart rke2-agent
+      systemd:
+        name: rke2-agent
+        state: restarted
+    - name: Test image pulls
+      command: |
+        crictl pull quay.io/thanos/thanos:v0.41.0
+      register: pull_test
+      failed_when: pull_test.rc != 0    

@@ -1,0 +1,214 @@
+- name: Install and bootstrap RKE2 server (master01 only)
+  hosts: masters[0]
+  become: true  
+
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+    - name: Ensure RKE2 config directory exists
+      file:
+        path: "{{ rke2_config_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Install pinned RKE2 version
+      shell: |
+        curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="{{ rke2_version }}" sh -
+      args:
+        executable: /bin/bash
+        creates: /usr/local/bin/rke2
+
+    - name: Write RKE2 server config.yaml
+      copy:
+        dest: "{{ rke2_config_file }}"
+        mode: "0600"
+        content: |
+          token: {{ rke2_token }}
+
+          tls-san:
+          {% for san in tls_sans %}
+            - {{ san }}
+          {% endfor %}
+
+          write-kubeconfig-mode: "{{ write_kubeconfig_mode }}"
+
+          cluster-cidr: {{ cluster_cidr }}
+          service-cidr: {{ service_cidr }}
+
+          disable:
+            - rke2-ingress-nginx
+
+          etcd-snapshot-schedule-cron: "0 */6 * * *"
+          etcd-snapshot-retention: 5
+
+    - name: Enable and start rke2-server
+      systemd:
+        name: rke2-server
+        enabled: true
+        state: started
+
+    - name: Wait for kubeconfig to be generated
+      wait_for:
+        path: /etc/rancher/rke2/rke2.yaml
+        timeout: 300
+
+    - name: Expose kubectl in PATH
+      file:
+        src: /var/lib/rancher/rke2/bin/kubectl
+        dest: /usr/local/bin/kubectl
+        state: link
+
+    - name: Setup kubeconfig for root
+      block:
+        - file:
+            path: /root/.kube
+            state: directory
+            mode: "0700"
+
+        - copy:
+            src: /etc/rancher/rke2/rke2.yaml
+            dest: /root/.kube/config
+            remote_src: true
+            mode: "0600"
+
+    - name: Setup kubeconfig for ansible_user
+      block:
+        - file:
+            path: "/home/{{ ansible_user }}/.kube"
+            state: directory
+            owner: "{{ ansible_user }}"
+            group: "{{ ansible_user }}"
+            mode: "0700"
+
+        - copy:
+            src: /etc/rancher/rke2/rke2.yaml
+            dest: "/home/{{ ansible_user }}/.kube/config"
+            remote_src: true
+            owner: "{{ ansible_user }}"
+            group: "{{ ansible_user }}"
+            mode: "0600"
+
+    - name: Add kubectl alias for root
+      lineinfile:
+        path: /root/.bashrc
+        regexp: '^alias k='
+        line: 'alias k=kubectl'
+        create: true
+        mode: "0644"
+
+    - name: Add kubectl alias for ansible_user
+      lineinfile:
+        path: "/home/{{ ansible_user }}/.bashrc"
+        regexp: '^alias k='
+        line: 'alias k=kubectl'
+        create: true
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0644"
+
+
+    # # ----------------------------
+    # Post-checks / validation
+    # ----------------------------
+
+    - name: Verify rke2-server service is active
+      systemd:
+        name: rke2-server
+      register: rke2_service_check
+
+    - name: Assert rke2-server is running
+      assert:
+        that:
+          - rke2_service_check.status.ActiveState == "active"
+        fail_msg: "rke2-server service is not active"
+
+    - name: Verify installed RKE2 version matches pin
+      command: rke2 --version
+      register: rke2_version_check
+      changed_when: false
+
+    - name: Assert pinned version is installed
+      assert:
+        that:
+          - rke2_version in rke2_version_check.stdout
+        fail_msg: "Installed RKE2 version does not match rke2_version pin"
+
+    - name: Wait for Kubernetes API (6443) to be reachable locally
+      wait_for:
+        host: 127.0.0.1
+        port: 6443
+        timeout: 180      
+
+    - name: Assert kubectl connectivity
+      command: kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get --raw /healthz
+      register: kubectl_health
+      changed_when: false
+      failed_when: kubectl_health.stdout != "ok"
+
+
+    - name: Wait until at least one node is Ready
+      command: kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes -o json
+      register: nodes_json
+      changed_when: false
+      retries: 18
+      delay: 10
+      until: >
+        (
+          nodes_json.stdout | from_json
+        )['items']
+        | map(attribute='status.conditions')
+        | flatten
+        | selectattr('type', 'equalto', 'Ready')
+        | selectattr('status', 'equalto', 'True')
+        | list
+        | length > 0
+
+    - name: Sanity check kube-system pods (basic visibility)
+      command: kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get pods -n kube-system --no-headers
+      register: kube_system_pods
+      changed_when: false
+
+    - name: Assert kube-system is reachable (pods list returned)
+      assert:
+        that:
+          - kube_system_pods.rc == 0
+        fail_msg: "Unable to list kube-system pods (cluster may not be fully initialized)"
+
+
+    - name: Assert node has sufficient memory
+      command: kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes -o json
+      register: node_conditions
+      changed_when: false
+      failed_when: >
+        (
+          node_conditions.stdout | from_json
+        )['items'][0]['status']['conditions']
+        | selectattr('type', 'equalto', 'MemoryPressure')
+        | selectattr('status', 'equalto', 'True')
+        | list
+        | length > 0
+        
+    
+    - name: Assert node has sufficient disk space
+      command: kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes -o json
+      register: node_conditions
+      changed_when: false
+      failed_when: >
+        (
+          node_conditions.stdout | from_json
+        )['items'][0]['status']['conditions']
+        | selectattr('type', 'equalto', 'DiskPressure')
+        | selectattr('status', 'equalto', 'True')
+        | list
+        | length > 0
+
+    - name: Bootstrap verification summary
+      debug:
+        msg:
+          - "rke2-server active: {{ rke2_service_check.status.ActiveState }}"
+          - "rke2 version: {{ rke2_version_check.stdout }}"
+          - "kubectl health: {{ kubectl_health.stdout }}"
+          - "kube-system pods listed: {{ kube_system_pods.stdout_lines | length }}"
+

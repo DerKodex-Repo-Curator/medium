@@ -1,0 +1,328 @@
+
+# # ----------------------------
+# # PLAY 0: Pre-flight checks (cluster must be healthy before we reboot)
+# # ----------------------------
+- name: Pre-flight - confirm cluster is healthy before reboot test
+  hosts: masters[0]
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Show current nodes
+      command: >
+        {{ rke2_kubectl }} --kubeconfig {{ rke2_kubeconfig }}
+        get nodes -o wide
+      register: pre_nodes
+      changed_when: false
+
+    - name: Pre-flight summary (nodes)
+      debug:
+        var: pre_nodes.stdout_lines
+
+    - name: Assert all nodes are Ready (pre-flight)
+      command: >
+        {{ rke2_kubectl }} --kubeconfig {{ rke2_kubeconfig }}
+        get nodes -o json
+      register: pre_nodes_json
+      changed_when: false
+
+    - name: Fail if any node is not Ready (pre-flight)
+      assert:
+        that:
+          - >
+            (
+              pre_nodes_json.stdout | from_json
+            )['items']
+            | map(attribute='status.conditions')
+            | list
+            | flatten
+            | selectattr('type','equalto','Ready')
+            | selectattr('status','equalto','True')
+            | list
+            | length
+            == (groups['all'] | length)
+        fail_msg: "Pre-flight failed: not all nodes are Ready. Fix cluster before running reboot test."
+
+# # ----------------------------
+# # PLAY 1: Persistence checks BEFORE reboot (disk mounts, fstab, utilities)
+# # ----------------------------
+- name: Pre-reboot validation - storage + utilities present
+  hosts: workers
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Ensure Longhorn mount directory exists
+      file:
+        path: "{{ longhorn_mount }}"
+        state: directory
+        mode: "0755"
+
+    - name: Check Longhorn mount is active (mountpoint)
+      command: "mountpoint -q {{ longhorn_mount }}"
+      register: lh_mnt_pre
+      changed_when: false
+      failed_when: false
+
+    - name: Check Longhorn mount source (findmnt)
+      command: "findmnt -n -o SOURCE {{ longhorn_mount }}"
+      register: lh_src_pre
+      changed_when: false
+      failed_when: false
+
+    - name: Check Longhorn device UUID (blkid)
+      command: "blkid -s UUID -o value {{ longhorn_device }}"
+      register: lh_uuid_pre
+      changed_when: false
+      failed_when: false
+
+    - name: Check fstab contains longhorn mount entry
+      command: "grep -E \"{{ longhorn_mount }}\" /etc/fstab"
+      register: lh_fstab_pre
+      changed_when: false
+      failed_when: false
+
+    - name: Check crictl config exists
+      stat:
+        path: /etc/crictl.yaml
+      register: crictl_cfg_pre
+
+    - name: Check kubectl symlink exists
+      stat:
+        path: /usr/local/bin/kubectl
+      register: kubectl_link_pre
+
+    - name: Pre-reboot node summary
+      debug:
+        msg:
+          - "Node: {{ inventory_hostname }}"
+          - "Longhorn mountpoint active: {{ 'yes' if lh_mnt_pre.rc == 0 else 'no' }}"
+          - "Longhorn mount source: {{ lh_src_pre.stdout | default('n/a') }}"
+          - "Longhorn device UUID: {{ lh_uuid_pre.stdout | default('n/a') }}"
+          - "fstab has longhorn entry: {{ 'yes' if lh_fstab_pre.rc == 0 else 'no' }}"
+          - "/etc/crictl.yaml exists: {{ crictl_cfg_pre.stat.exists }}"
+          - "/usr/local/bin/kubectl exists: {{ kubectl_link_pre.stat.exists }}"
+
+# # ----------------------------
+# # PLAY 2: Rolling reboot WORKERS (safe - does not affect etcd quorum)
+# # ----------------------------
+- name: Rolling reboot workers + validate node returns Ready
+  hosts: workers
+  become: true
+  gather_facts: false
+  serial: "{{ cluster_worker_serial | default(1) }}"
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Reboot worker safely
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ cluster_reboot_timeout | default(900) }}"
+        post_reboot_delay: "{{ cluster_post_reboot_delay | default(20) }}"
+        connect_timeout: "{{ cluster_connect_timeout | default(10) }}"
+        test_command: "uptime"
+        msg: "Reboot initiated by Ansible (cluster reboot test)"
+      register: reboot_worker
+      changed_when: true
+    
+    - name: Validate Longhorn mount after reboot (worker)
+      command: "mountpoint -q {{ longhorn_mount }}"
+      register: lh_mnt_post_w
+      changed_when: false
+      when: inventory_hostname in groups['workers']
+
+    - name: Wait until worker is Ready (checked from master01)
+      command: >
+        {{ rke2_kubectl }} --kubeconfig {{ rke2_kubeconfig }}
+        wait node/{{ inventory_hostname }}
+        --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
+        --timeout=300s
+      delegate_to: "{{ groups['masters'][0] }}"
+      changed_when: false
+      # kubectl wait supports jsonpath readiness checks [3](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_wait/)
+
+    - name: Worker post-reboot summary
+      debug:
+        msg:
+          - "Worker {{ inventory_hostname }} rebooted"
+          - "Longhorn mount active: {{ 'yes' if lh_mnt_post_w.rc == 0 else 'no' }}"
+          - "Reboot elapsed seconds: {{ reboot_worker.elapsed | default('n/a') }}"
+
+# ----------------------------
+# PLAY 3: Rolling reboot MASTERS (MUST be 1 at a time to keep quorum)
+# ----------------------------
+- name: Rolling reboot masters + validate kube-vip + Ready
+  hosts: masters
+  become: true
+  gather_facts: false
+  serial: "{{ cluster_master_serial | default(1) }}"
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    primary_check_master: "{{ groups['masters'][0] }}"
+    secondary_check_master: "{{ groups['masters'][1] | default(groups['masters'][0]) }}"
+    kubevip_ns: kube-system
+    kubevip_ds: kube-vip-ds
+
+  tasks:
+    - name: Select a healthy master for kubectl checks during this iteration
+      set_fact:
+        check_master: "{{ (inventory_hostname == primary_check_master) | ternary(secondary_check_master, primary_check_master) }}"
+
+    - name: Reboot master safely (one at a time)
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ cluster_reboot_timeout | default(900) }}"
+        post_reboot_delay: "{{ cluster_post_reboot_delay | default(20) }}"
+        connect_timeout: "{{ cluster_connect_timeout | default(10) }}"
+        test_command: "uptime"
+        msg: "Reboot initiated by Ansible (rolling master reboot)"
+      register: reboot_master
+      changed_when: true
+
+    - name: Validate Longhorn mount after reboot (master)
+      command: "mountpoint -q {{ longhorn_mount }}"
+      register: lh_mnt_post_m
+      changed_when: false
+      when: inventory_hostname in groups['workers']
+
+    - name: Wait until master node is Ready (checked from selected check master)
+      command: >
+        {{ rke2_kubectl }} --kubeconfig {{ rke2_kubeconfig }}
+        wait node/{{ inventory_hostname }}
+        --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
+        --timeout=300s
+      delegate_to: "{{ check_master }}"
+      changed_when: false
+
+    - name: Verify kube-vip DaemonSet scheduling/ready (authoritative)
+      command: >
+        {{ rke2_kubectl }} --kubeconfig {{ rke2_kubeconfig }}
+        get daemonset {{ kubevip_ds }} -n {{ kubevip_ns }} -o json
+      delegate_to: "{{ check_master }}"
+      register: kubevip_ds_json
+      changed_when: false
+
+
+    - name: Verify kube-vip DaemonSet scheduling/ready (authoritative)
+      command: >
+        {{ rke2_kubectl }} --kubeconfig {{ rke2_kubeconfig }}
+        get daemonset {{ kubevip_ds }} -n {{ kubevip_ns }} -o json
+      delegate_to: "{{ check_master }}"
+      register: kubevip_ds_json
+      changed_when: false
+      retries: 12
+      delay: 10
+      until: >
+        (
+          (kubevip_ds_json.stdout | from_json).status.desiredNumberScheduled
+        ==
+          (kubevip_ds_json.stdout | from_json).status.numberReady
+        )
+
+
+
+
+    - name: Verify Kubernetes API is reachable via VIP from L2 node (kube-vip ARP-safe)
+      shell: |
+        curl -k -s -o /dev/null -w "%{http_code}" https://{{ kube_vip_ip }}:6443/healthz
+      register: vip_health
+      changed_when: false
+      retries: 10
+      delay: 3
+      until: vip_health.stdout in ["200", "401"]
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
+
+    - name: Master post-reboot summary
+      debug:
+        msg:
+          - "Master rebooted"   
+          - "VIP {{ kube_vip_ip }} API readyz status: {{ vip_health.stdout }}"
+          - "Reboot elapsed seconds: {{ reboot_master.elapsed | default('n/a') }}"
+
+# ----------------------------
+# PLAY 4: Post-flight checks (all nodes Ready, VIP ownership, Longhorn persisted)
+# ----------------------------
+- name: Post-flight - cluster-wide validation
+  hosts: masters[0]
+  become: true
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    kubevip_ns: kube-system
+    kubevip_ds: kube-vip-ds
+
+  tasks:
+    - name: Verify all nodes Ready (post-flight)
+      command: >
+        {{ rke2_kubectl }} --kubeconfig {{ rke2_kubeconfig }}
+        get nodes -o json
+      register: post_nodes_json
+      changed_when: false
+
+    - name: Assert all nodes Ready (post-flight)
+      assert:
+        that:
+          - >
+            (
+              post_nodes_json.stdout | from_json
+            )['items']
+            | map(attribute='status.conditions')
+            | list
+            | flatten
+            | selectattr('type','equalto','Ready')
+            | selectattr('status','equalto','True')
+            | list
+            | length
+            == (groups['all'] | length)
+        fail_msg: "Post-flight failed: not all nodes are Ready"
+
+    - name: Verify kube-vip DaemonSet Ready (post-flight)
+      command: >
+        {{ rke2_kubectl }} --kubeconfig {{ rke2_kubeconfig }}
+        get daemonset {{ kubevip_ds }} -n {{ kubevip_ns }} -o json
+      register: kubevip_ds_json_final
+      changed_when: false
+
+    - name: Assert kube-vip DS desired == ready (post-flight)
+      assert:
+        that:
+          - (kubevip_ds_json_final.stdout | from_json).status.desiredNumberScheduled
+            == (kubevip_ds_json_final.stdout | from_json).status.numberReady
+        fail_msg: "Post-flight failed: kube-vip DS not Ready everywhere"
+
+    - name: Check VIP is bound on exactly one master (ARP leader ownership)
+      shell: |
+        ip addr | grep -q "{{ kube_vip_ip }}" && echo PRESENT || echo ABSENT
+      register: vip_presence
+      changed_when: false
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['masters'] }}"
+
+    - name: Assert VIP present on exactly one master
+      assert:
+        that:
+          - (vip_presence.results | map(attribute='stdout') | select('equalto','PRESENT') | list | length) == 1
+        fail_msg: "VIP {{ kube_vip_ip }} is not present on exactly one master (unexpected kube-vip state)"
+
+    - name: Validate Longhorn mount still present on all worker nodes (post-flight)
+      command: "mountpoint -q {{ longhorn_mount }}"
+      register: lh_mount_all
+      changed_when: false
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['workers'] }}"
+
+    - name: Post-flight summary
+      debug:
+        msg:
+          - "All nodes Ready"
+          - "kube-vip DS Ready"
+          - "VIP {{ kube_vip_ip }} owned by exactly one master"
+          - "Longhorn mountpoint {{ longhorn_mount }} present on all worker nodes"

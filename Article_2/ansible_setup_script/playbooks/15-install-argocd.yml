@@ -1,0 +1,403 @@
+- name: Install Argo CD with ESO-backed secrets, LDAP, Reloader and GitOps bootstrap
+  hosts: masters[0]
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    argocd_manifest_url: >-
+      https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
+
+    # External Secrets
+    eso_cluster_secret_store_name: azure-kv
+
+    # Azure Key Vault secret names
+    akv_argocd_admin_password_key: argocd-admin-password-bcrypthash
+
+    akv_gitlab_username_key: argocd-gitlab-username
+    akv_gitlab_token_key: argocd-gitlab-token
+
+    akv_ldap_bind_dn_key: kubernetesldapacc-ldap-bind-dn
+    akv_ldap_bind_password_key: kubernetesldapacc-ldap-bind-password
+
+  tasks:
+
+    ###########################################################################
+    # Pre-flight checks
+    ###########################################################################
+
+    - name: Check ExternalSecret CRD exists
+      command: kubectl get crd externalsecrets.external-secrets.io
+      changed_when: false
+
+    - name: Check ClusterSecretStore exists
+      command: >
+        kubectl get clustersecretstore.external-secrets.io
+        {{ eso_cluster_secret_store_name }}
+      changed_when: false
+
+    ###########################################################################
+    # Namespace
+    ###########################################################################
+
+    - name: Ensure Argo CD namespace exists
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ argocd_namespace }}"
+
+    ###########################################################################
+    # Install Argo CD upstream manifests
+    ###########################################################################
+
+    - name: Apply Argo CD upstream manifests
+      command: >
+        kubectl apply
+        --server-side
+        --force-conflicts
+        -n {{ argocd_namespace }}
+        -f {{ argocd_manifest_url }}
+
+    - name: Wait for Argo CD deployments
+      command: >
+        kubectl -n {{ argocd_namespace }}
+        wait deployment --all
+        --for=condition=Available
+        --timeout=300s
+      changed_when: false
+
+    ###########################################################################
+    # Argo CD server parameters
+    ###########################################################################
+
+    - name: Configure Argo CD server insecure mode
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: argocd-cmd-params-cm
+            namespace: "{{ argocd_namespace }}"
+          data:
+            server.insecure: "true"
+
+    ###########################################################################
+    # Argo CD service - ClusterIP only
+    ###########################################################################
+
+    - name: Configure argocd-server service as ClusterIP
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: argocd-server
+            namespace: "{{ argocd_namespace }}"
+          spec:
+            type: ClusterIP
+            selector:
+              app.kubernetes.io/name: argocd-server
+            ports:
+              - name: http
+                port: 80
+                targetPort: 8080
+
+    ###########################################################################
+    # ExternalSecret: argocd-secret
+    #
+    # This merges values into the existing upstream argocd-secret.
+    # Secrets come only from Azure Key Vault.
+    ###########################################################################
+
+    - name: Create ExternalSecret for argocd-secret
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: external-secrets.io/v1
+          kind: ExternalSecret
+          metadata:
+            name: argocd-secret
+            namespace: "{{ argocd_namespace }}"
+          spec:
+            refreshInterval: 1m
+
+            secretStoreRef:
+              kind: ClusterSecretStore
+              name: "{{ eso_cluster_secret_store_name }}"
+
+            target:
+              name: argocd-secret
+              creationPolicy: Merge
+
+            data:
+              - secretKey: dex.ldap.bindDN
+                remoteRef:
+                  key: "{{ akv_ldap_bind_dn_key }}"
+
+              - secretKey: dex.ldap.bindPW
+                remoteRef:
+                  key: "{{ akv_ldap_bind_password_key }}"
+
+              - secretKey: admin.password
+                remoteRef:
+                  key: "{{ akv_argocd_admin_password_key }}"
+
+
+    ###########################################################################
+    # ExternalSecret: GitOps repository secret
+    #
+    # Argo CD repository credential secret.
+    # Username/password come only from Azure Key Vault.
+    ###########################################################################
+
+    - name: Create ExternalSecret for GitOps repository secret
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: external-secrets.io/v1
+          kind: ExternalSecret
+          metadata:
+            name: gitops-repo
+            namespace: "{{ argocd_namespace }}"
+          spec:
+            refreshInterval: 1m
+
+            secretStoreRef:
+              kind: ClusterSecretStore
+              name: "{{ eso_cluster_secret_store_name }}"
+
+            target:
+              name: gitops-repo
+              creationPolicy: Owner
+
+              template:
+                engineVersion: v2
+
+                metadata:
+                  labels:
+                    argocd.argoproj.io/secret-type: repository
+
+                data:
+                  type: git
+                  url: "{{ gitops_repo_url }}"
+                  username: '{{ "{{ .username }}" }}'
+                  password: '{{ "{{ .password }}" }}'
+
+            data:
+              - secretKey: username
+                remoteRef:
+                  key: "{{ akv_gitlab_username_key }}"
+
+              - secretKey: password
+                remoteRef:
+                  key: "{{ akv_gitlab_token_key }}"
+
+    ###########################################################################
+    # Wait for ESO synchronization
+    ###########################################################################
+
+    - name: Wait for ExternalSecret argocd-secret to become Ready
+      command: >
+        kubectl -n {{ argocd_namespace }}
+        wait externalsecret.external-secrets.io/argocd-secret
+        --for=condition=Ready=True
+        --timeout=300s
+      changed_when: false
+
+    - name: Wait for ExternalSecret gitops-repo to become Ready
+      command: >
+        kubectl -n {{ argocd_namespace }}
+        wait externalsecret.external-secrets.io/gitops-repo
+        --for=condition=Ready=True
+        --timeout=300s
+      changed_when: false
+
+    - name: Verify argocd-secret exists
+      command: kubectl -n {{ argocd_namespace }} get secret argocd-secret
+      changed_when: false
+
+    - name: Verify gitops-repo secret exists
+      command: kubectl -n {{ argocd_namespace }} get secret gitops-repo
+      changed_when: false
+
+    ###########################################################################
+    # Argo CD configuration with LDAP / Dex
+    ###########################################################################
+
+    - name: Configure Argo CD URL and Dex LDAP connector
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: argocd-cm
+            namespace: "{{ argocd_namespace }}"
+          data:
+            url: "https://{{ argocd_hostname }}"
+            admin.enabled: "true"
+            sso.autoRedirect: "false"
+
+            dex.config: |
+              logger:
+                level: info
+
+              connectors:
+              - type: ldap
+                id: openldap
+                name: OpenLDAP
+
+                config:
+                  host: "{{ ldap.host }}"
+                  insecureNoSSL: true
+                  insecureSkipVerify: true
+                  startTLS: false
+
+                  bindDN: "$dex.ldap.bindDN"
+                  bindPW: "$dex.ldap.bindPW"
+
+                  usernamePrompt: Username
+
+                  userSearch:
+                    baseDN: "{{ ldap.user_base_dn }}"
+                    filter: "{{ ldap.user_filter }}"
+                    username: "{{ ldap.user_attr }}"
+                    idAttr: "{{ ldap.user_attr }}"
+                    emailAttr: "{{ ldap.email_attr }}"
+                    nameAttr: "{{ ldap.name_attr }}"
+
+                  groupSearch:
+                    baseDN: "{{ ldap.group_base_dn }}"
+                    filter: "{{ ldap.group_filter }}"
+
+                    userMatchers:
+                    - userAttr: DN
+                      groupAttr: "{{ ldap.group_attr }}"
+
+                    nameAttr: cn
+
+    ###########################################################################
+    # Argo CD RBAC
+    ###########################################################################
+
+    - name: Configure Argo CD RBAC
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: argocd-rbac-cm
+            namespace: "{{ argocd_namespace }}"
+          data:
+            policy.default: role:readonly
+            scopes: '[groups,email]'
+            policy.csv: |
+              g, {{ argocd_admin_group }}, role:admin
+
+    ###########################################################################
+    # Reloader annotations
+    #
+    # These annotations are placed on Pod templates.
+    # Patching Pod templates also triggers the initial rollout after config/secret changes.
+    ###########################################################################
+
+    - name: Add Reloader annotations to Argo CD deployments
+      command: >
+        kubectl -n {{ argocd_namespace }}
+        patch deployment {{ item }}
+        --type merge
+        -p '{"spec":{"template":{"metadata":{"annotations":{"reloader.stakater.com/auto":"true","secret.reloader.stakater.com/reload":"argocd-secret,gitops-repo","configmap.reloader.stakater.com/reload":"argocd-cm,argocd-rbac-cm,argocd-cmd-params-cm"}}}}}'
+      loop:
+        - argocd-server
+        - argocd-dex-server
+        - argocd-repo-server
+        - argocd-applicationset-controller
+        - argocd-notifications-controller
+      register: patch_deployments
+      failed_when: false
+      changed_when: "'patched' in patch_deployments.stdout or 'configured' in patch_deployments.stdout"
+
+    - name: Add Reloader annotations to Argo CD application controller StatefulSet
+      command: >
+        kubectl -n {{ argocd_namespace }}
+        patch statefulset argocd-application-controller
+        --type merge
+        -p '{"spec":{"template":{"metadata":{"annotations":{"reloader.stakater.com/auto":"true","secret.reloader.stakater.com/reload":"argocd-secret,gitops-repo","configmap.reloader.stakater.com/reload":"argocd-cm,argocd-rbac-cm,argocd-cmd-params-cm"}}}}}'
+      register: patch_application_controller
+      failed_when: false
+      changed_when: "'patched' in patch_application_controller.stdout or 'configured' in patch_application_controller.stdout"
+
+    ###########################################################################
+    # Wait for Argo CD after rollout triggered by annotation/config changes
+    ###########################################################################
+
+    - name: Wait for argocd-server rollout
+      command: >
+        kubectl -n {{ argocd_namespace }}
+        rollout status deployment/argocd-server
+        --timeout=300s
+      changed_when: false
+
+    - name: Wait for argocd-dex-server rollout
+      command: >
+        kubectl -n {{ argocd_namespace }}
+        rollout status deployment/argocd-dex-server
+        --timeout=300s
+      changed_when: false
+
+    - name: Wait for argocd-repo-server rollout
+      command: >
+        kubectl -n {{ argocd_namespace }}
+        rollout status deployment/argocd-repo-server
+        --timeout=300s
+      changed_when: false
+
+    ###########################################################################
+    # Bootstrap GitOps
+    #
+    # This uses gitops-repo secret created by ESO.
+    ###########################################################################
+
+    - name: Bootstrap Argo CD from GitOps repository
+      kubernetes.core.k8s:
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: gitops-bootstrap
+            namespace: "{{ argocd_namespace }}"
+          spec:
+            project: default
+
+            source:
+              repoURL: "{{ gitops_repo_url }}"
+              targetRevision: "{{ gitops_repo_revision | default('main') }}"
+              path: 0-argocd/0-bootstrap
+              directory:
+                recurse: true
+
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: "{{ argocd_namespace }}"
+
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true

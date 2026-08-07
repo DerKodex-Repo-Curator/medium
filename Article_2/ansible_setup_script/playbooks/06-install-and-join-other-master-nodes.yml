@@ -1,0 +1,124 @@
+- name: Install and join additional RKE2 servers (master02+master03)
+  hosts: masters[1:]
+  become: true
+
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+
+  tasks:
+    - name: Ensure RKE2 config directory exists
+      file:
+        path: "{{ rke2_config_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Install pinned RKE2 version
+      shell: |
+        curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="{{ rke2_version }}" sh -
+      args:
+        executable: /bin/bash
+        creates: /usr/local/bin/rke2
+
+    - name: Write RKE2 server join config.yaml (join via VIP:9345)
+      copy:
+        dest: "{{ rke2_config_file }}"
+        mode: "0600"
+        content: |
+          server: https://{{ kube_vip_ip }}:9345
+          token: {{ rke2_token }}
+
+          tls-san:
+          {% for san in tls_sans %}
+            - {{ san }}
+          {% endfor %}
+
+          write-kubeconfig-mode: "{{ write_kubeconfig_mode }}"
+
+          cluster-cidr: {{ cluster_cidr }}
+          service-cidr: {{ service_cidr }}
+
+          disable:
+            - rke2-ingress-nginx
+
+          etcd-snapshot-schedule-cron: "0 */6 * * *"
+          etcd-snapshot-retention: 10
+
+
+    - name: Enable and start rke2-server
+      systemd:
+        name: rke2-server
+        enabled: true
+        state: started
+
+    - name: Read kube-vip manifest from master01
+      ansible.builtin.slurp:
+        src: "{{ rke2_manifests_dir }}/kube-vip.yaml"
+      delegate_to: "{{ groups['masters'][0] }}"
+      run_once: true
+      register: kubevip_manifest
+
+
+    - name: Copy kube-vip manifest to all masters
+      ansible.builtin.copy:
+        dest: "{{ rke2_manifests_dir }}/kube-vip.yaml"
+        content: "{{ kubevip_manifest.content | b64decode }}"
+        mode: "0644"
+
+    - name: Restart rke2-server on secondary masters
+      ansible.builtin.systemd:
+        name: rke2-server
+        state: restarted
+      when: inventory_hostname != groups['masters'][0]
+    # # ----------------------------
+    # Post-checks / validation
+    # ----------------------------
+
+    - name: Verify rke2-server service is active
+      systemd:
+        name: rke2-server
+      register: rke2_service_check
+
+    - name: Assert rke2-server is running
+      assert:
+        that:
+          - rke2_service_check.status.ActiveState == "active"
+        fail_msg: "rke2-server service is not active"
+
+    - name: Verify installed RKE2 version matches pin
+      command: rke2 --version
+      register: rke2_version_check
+      changed_when: false
+
+    - name: Assert pinned version is installed
+      assert:
+        that:
+          - rke2_version in rke2_version_check.stdout
+        fail_msg: "Installed RKE2 version does not match rke2_version pin"
+                
+    - name: Wait until this node appears in the cluster (checked from master01)
+      command: "{{ rke2_kubectl }} --kubeconfig {{ rke2_kubeconfig }} get node {{ inventory_hostname }}"
+      delegate_to: "{{ groups['masters'][0] }}"
+      register: node_seen
+      retries: 30
+      delay: 10
+      until: node_seen.rc == 0
+      changed_when: false
+
+    - name: Wait until this node is Ready (checked from master01)
+      command: "{{ rke2_kubectl }} --kubeconfig {{ rke2_kubeconfig }} get node {{ inventory_hostname }} -o json"
+      delegate_to: "{{ groups['masters'][0] }}"
+      register: node_json
+      retries: 30
+      delay: 10
+      until: >
+        (
+          node_json.stdout | from_json
+        )['status']['conditions']
+        | selectattr('type', 'equalto', 'Ready')
+        | selectattr('status', 'equalto', 'True')
+        | list
+        | length > 0
+      changed_when: false
+

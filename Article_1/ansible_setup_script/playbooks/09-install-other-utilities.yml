@@ -1,0 +1,46 @@
+# --------------------------------------------------
+# Kubernetes utilities setup (kubectl + kubeconfig)
+# File: playbooks/09-install-k8s-utilities.yml
+# --------------------------------------------------
+
+- name: Install kubectl and kubeconfig utilities
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+
+# ----------------------------
+    # Expose crictl in PATH (RKE2-managed)
+    # ----------------------------
+    - name: Expose crictl in PATH if present
+      file:
+        src: /var/lib/rancher/rke2/bin/crictl
+        dest: /usr/local/bin/crictl
+        state: link
+      ignore_errors: true
+
+    # ----------------------------
+    # Configure crictl for RKE2 containerd
+    # ----------------------------
+    - name: Install crictl config for RKE2
+      copy:
+        dest: /etc/crictl.yaml
+        mode: "0644"
+        content: |
+          runtime-endpoint: unix:///run/k3s/containerd/containerd.sock
+          image-endpoint: unix:///run/k3s/containerd/containerd.sock
+          timeout: 10
+          debug: false
+     
+           
+    - name: Install Helm 3
+      become: true
+      shell: |
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
+      when: "'masters' in group_names"

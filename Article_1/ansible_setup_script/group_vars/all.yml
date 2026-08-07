@@ -1,0 +1,57 @@
+# Global Ansible settings
+ansible_user: cloud
+ansible_python_interpreter: /usr/bin/python3
+
+# SSH key 
+public_key_path: keys/ansible_ed25519.pub
+ansible_ssh_private_key_file: "{{ playbook_dir }}/../keys/ansible_ed25519"
+
+# RKE2 pinning 
+rke2_version: "v1.36.1+rke2r2"
+
+# RKE2 config settings
+rke2_config_dir: /etc/rancher/rke2
+rke2_config_file: /etc/rancher/rke2/config.yaml
+
+# For verification (we run kubectl checks from master01)
+rke2_kubeconfig: "/etc/rancher/rke2/rke2.yaml"
+rke2_kubectl: "/var/lib/rancher/rke2/bin/kubectl"
+rke2_manifests_dir: /var/lib/rancher/rke2/server/manifests
+
+# kube-vip
+kube_vip_ip: "10.0.0.41"
+tls_sans:
+  - "10.0.0.41"   # kube-vip
+  - "10.0.0.28"   # master01
+  - "10.0.0.29"   # master02
+  - "10.0.0.30"   # master03
+
+write_kubeconfig_mode: "0644"
+
+# Networking (avoid overlap with your host Proxmox net)
+cluster_cidr: "172.16.0.0/16"
+service_cidr: "172.17.0.0/16"
+
+kube_vip_version: "v1.1.2"
+kube_vip_image: "ghcr.io/kube-vip/kube-vip:{{ kube_vip_version }}"
+
+
+k8s_region: <labname>-<continent>-<city>
+dns_nameservers:
+  - 1.1.1.1
+  - 8.8.8.8
+dns_search: <yourdomain>.com
+
+# Longhorn disk settings
+longhorn_device: /dev/sdb
+longhorn_mount: /var/lib/longhorn
+longhorn_fs: ext4
+
+cluster_reboot_timeout: 900         # seconds
+cluster_post_reboot_delay: 20       # seconds to let services settle
+cluster_connect_timeout: 10         # seconds per SSH probe
+cluster_master_serial: 1
+cluster_worker_serial: 1
+
+
+

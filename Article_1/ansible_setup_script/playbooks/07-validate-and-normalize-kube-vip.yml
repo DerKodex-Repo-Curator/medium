@@ -1,0 +1,165 @@
+
+- name: Validate kube-vip HA from primary master
+  hosts: masters[0]
+  become: true
+  remote_user: cloud
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    kubevip_namespace: kube-system
+    kubevip_daemonset: kube-vip-ds
+
+  tasks:
+
+    - name: Fetch kube-vip DaemonSet status
+      command: >
+        {{ rke2_kubectl }} --kubeconfig {{ rke2_kubeconfig }}
+        get daemonset {{ kubevip_daemonset }}
+        -n {{ kubevip_namespace }}
+        -o json
+      register: kubevip_ds_json
+      changed_when: false
+
+    - name: Assert kube-vip DaemonSet exists
+      assert:
+        that:
+          - kubevip_ds_json.rc == 0
+        fail_msg: "kube-vip DaemonSet does not exist in {{ kubevip_namespace }}"
+
+
+    - name: Assert kube-vip is running on all master nodes
+      assert:
+        that:
+          - (kubevip_ds_json.stdout | from_json).status.desiredNumberScheduled
+            == (kubevip_ds_json.stdout | from_json).status.numberReady
+        fail_msg: >
+          kube-vip DaemonSet is not Ready on all masters
+          (desired != ready)
+
+
+    - name: Verify Kubernetes API is reachable via kube-vip VIP
+      shell: |
+        curl -k -s -o /dev/null -w "%{http_code}" \
+          https://{{ kube_vip_ip }}:6443/healthz
+      register: kubevip_api
+      retries: 10
+      delegate_to: "{{ groups['masters'][0] }}"
+      delay: 3
+      until: kubevip_api.stdout in ["200", "401"]
+      changed_when: false
+
+    - name: Assert Kubernetes API works via VIP
+      assert:
+        that:
+          - kubevip_api.stdout in ["200", "401"]
+        fail_msg: "Kubernetes API not reachable via kube-vip VIP {{ kube_vip_ip }}"
+
+    - name: kube-vip validation summary
+      debug:
+        msg:
+          - "kube-vip DaemonSet: present"
+          - "Desired pods: {{ (kubevip_ds_json.stdout | from_json).status.desiredNumberScheduled }}"
+          - "Ready pods: {{ (kubevip_ds_json.stdout | from_json).status.numberReady }}"
+          - "API reachable via VIP {{ kube_vip_ip }}"
+
+- name: Normalize kubeconfigs on all masters to use kube-vip
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  vars:
+    kube_api_endpoint: "{{ kube_vip_ip }}"
+    kubeconfig_server: "https://{{ kube_api_endpoint }}:6443"
+
+    kubeconfig_targets:
+      - path: /root/.kube/config
+        owner: root
+        group: root
+        mode: "0600"
+
+      - path: "/home/{{ ansible_user }}/.kube/config"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0600"
+
+  tasks:
+      # ----------------------------
+    # Expose kubectl in PATH (RKE2-managed binary)
+    # ----------------------------
+    - name: Expose kubectl in PATH if present
+      file:
+        src: "{{ rke2_kubectl }}"
+        dest: /usr/local/bin/kubectl
+        state: link
+      ignore_errors: true
+      
+    - name: Ensure root kubeconfig directory exists
+      file:
+        path: /root/.kube
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Ensure ansible_user kubeconfig directory exists
+      file:
+        path: "/home/{{ ansible_user }}/.kube"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0700"
+
+    - name: Wait for RKE2 admin kubeconfig to exist
+      wait_for:
+        path: /etc/rancher/rke2/rke2.yaml
+        timeout: 300
+
+    - name: Read node-local RKE2 kubeconfig
+      slurp:
+        src: /etc/rancher/rke2/rke2.yaml
+      register: rke2_kubeconfig_raw
+
+    - name: Replace server endpoint with kube-vip
+      set_fact:
+        rke2_kubeconfig_vip: >-
+          {{
+            (rke2_kubeconfig_raw.content | b64decode)
+            | regex_replace('server: https://[^\\s]+:6443', 'server: ' ~ kubeconfig_server)
+          }}
+
+    - name: Assert kubeconfig rewritten correctly
+      assert:
+        that:
+          - "'server: ' ~ kubeconfig_server in rke2_kubeconfig_vip"
+        fail_msg: "Failed to rewrite kubeconfig to use {{ kubeconfig_server }}"
+
+    - name: Write kubeconfig for root and ansible_user
+      copy:
+        dest: "{{ item.path }}"
+        content: "{{ rke2_kubeconfig_vip }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop: "{{ kubeconfig_targets }}"
+
+    - name: Verify kubectl works through VIP
+      command: kubectl --kubeconfig /root/.kube/config get --raw /healthz
+      register: kubectl_health
+      changed_when: false
+      failed_when: kubectl_health.stdout != "ok"
+
+    - name: Summary
+      debug:
+        msg:
+          - "Node: {{ inventory_hostname }}"
+          - "kubeconfig server: {{ kubeconfig_server }}"
+          - "root kubeconfig updated"
+          - "ansible_user kubeconfig updated"
+          - "kubectl via VIP: {{ kubectl_health.stdout }}"

@@ -1,0 +1,105 @@
+# --------------------------------------------------
+# Prepare dedicated Longhorn disks on workers nodes
+# File: playbooks/10-prepare-longhorn-disks.yml
+# --------------------------------------------------
+
+- name: Prepare disks for Longhorn (/var/lib/longhorn)
+  hosts: workers
+  become: true
+  gather_facts: false
+
+  vars_files:
+    - ../group_vars/all.yml
+    
+
+  tasks:
+    # ----------------------------
+    # Sanity checks
+    # ----------------------------
+    - name: Ensure Longhorn block device exists
+      stat:
+        path: "{{ longhorn_device }}"
+      register: longhorn_disk
+
+    - name: Fail if Longhorn disk does not exist
+      fail:
+        msg: "Longhorn disk {{ longhorn_device }} not found on this node"
+      when: not longhorn_disk.stat.exists
+
+    # ----------------------------
+    # Filesystem
+    # ----------------------------
+    - name: Check if filesystem already exists on Longhorn disk
+      command: "blkid {{ longhorn_device }}"
+      register: longhorn_blkid
+      failed_when: false
+      changed_when: false
+
+    - name: Create ext4 filesystem on Longhorn disk (only if empty)
+      command: "mkfs.ext4 {{ longhorn_device }}"
+      when: longhorn_blkid.rc != 0
+
+    # ----------------------------
+    # Mount point
+    # ----------------------------
+    - name: Ensure Longhorn mount directory exists
+      file:
+        path: "{{ longhorn_mount }}"
+        state: directory
+        mode: "0755"
+
+    # ----------------------------
+    # fstab entry (UUID-based)
+    # ----------------------------
+    - name: Get UUID of Longhorn disk
+      command: "blkid -s UUID -o value {{ longhorn_device }}"
+      register: longhorn_uuid
+      changed_when: false
+
+    - name: Ensure Longhorn disk is present in /etc/fstab
+      mount:
+        path: "{{ longhorn_mount }}"
+        src: "UUID={{ longhorn_uuid.stdout }}"
+        fstype: "{{ longhorn_fs }}"
+        opts: defaults
+        state: present
+
+    # ----------------------------
+    # Mount verification
+    # ----------------------------
+    - name: Unmount Longhorn mount if mounted (clean remount)
+      command: "umount {{ longhorn_mount }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Mount all filesystems from fstab
+      command: "mount -a"
+      changed_when: false
+
+    # ----------------------------
+    # Final validation
+    # ----------------------------
+
+    - name: Verify Longhorn mount is active
+      command: mountpoint -q {{ longhorn_mount }}
+      register: mount_check
+      changed_when: false
+
+    - name: Assert Longhorn disk is mounted
+      assert:
+        that:
+          - mount_check.rc == 0
+        fail_msg: "{{ longhorn_mount }} is not mounted"
+
+    - name: Get Longhorn disk usage
+      command: "df -h {{ longhorn_mount }}"
+      register: df_check
+      changed_when: false
+
+    - name: Longhorn disk preparation summary
+      debug:
+        msg:
+          - "Device: {{ longhorn_device }}"
+          - "UUID: {{ longhorn_uuid.stdout }}"
+          - "Mounted at: {{ longhorn_mount }}"
+          - "{{ df_check.stdout }}"

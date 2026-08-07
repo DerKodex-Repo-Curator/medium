@@ -1,0 +1,176 @@
+- name: Enable kube-vip on the bootstrapped RKE2 master 
+  hosts: masters[0]
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  vars:
+    # Use RKE2-bundled ctr directly
+    rke2_ctr: /var/lib/rancher/rke2/bin/ctr
+    rke2_containerd_sock: /run/k3s/containerd/containerd.sock
+
+    kubevip_ns: kube-system
+    kubevip_ds_name: kube-vip-ds
+    kubevip_label_selector: "app.kubernetes.io/name=kube-vip-ds"
+
+  tasks:
+    - name: Determine primary network interface (default route)
+      set_fact:
+        kube_vip_interface: "{{ ansible_default_ipv4.interface }}"
+
+    - name: Assert kube-vip interface was detected
+      assert:
+        that:
+          - kube_vip_interface is defined
+          - kube_vip_interface | length > 0
+        fail_msg: "Could not detect default network interface (ansible_default_ipv4.interface is empty)."
+
+    - name: Show which interface kube-vip will use
+      debug:
+        msg: "kube-vip will advertise VIP {{ kube_vip_ip }} on interface {{ kube_vip_interface }}"
+
+    - name: Ensure RKE2 manifests directory exists
+      file:
+        path: "{{ rke2_manifests_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Install kube-vip RBAC (DaemonSet mode)
+      command: kubectl --kubeconfig {{ rke2_kubeconfig }} apply -f https://kube-vip.io/manifests/rbac.yaml
+      changed_when: false
+
+    - name: Wait for kube-vip ServiceAccount to exist
+      command: kubectl --kubeconfig {{ rke2_kubeconfig }} -n {{ kubevip_ns }} get serviceaccount kube-vip
+      register: kubevip_sa
+      retries: 12
+      delay: 5
+      until: kubevip_sa.rc == 0
+      changed_when: false
+
+    
+    - name: Render kube-vip DaemonSet manifest into RKE2 manifests directory
+      shell: |
+        set -e
+        "{{ rke2_ctr }}" \
+          --address "{{ rke2_containerd_sock }}" \
+          --namespace k8s.io image pull "{{ kube_vip_image }}"
+
+        "{{ rke2_ctr }}" \
+          --address "{{ rke2_containerd_sock }}" \
+          --namespace k8s.io run --rm --net-host "{{ kube_vip_image }}" vip /kube-vip \
+            manifest daemonset \
+            --arp \
+            --interface "{{ kube_vip_interface }}" \
+            --address "{{ kube_vip_ip }}" \
+            --controlplane \
+            --leaderElection \         
+            > "{{ rke2_manifests_dir }}/kube-vip.yaml"
+      args:
+        executable: /bin/bash
+
+    - name: Ensure kube-vip DaemonSet Pod spec uses ServiceAccount kube-vip
+      lineinfile:
+        path: "{{ rke2_manifests_dir }}/kube-vip.yaml"
+        insertafter: '^    spec:$'
+        regexp: '^      serviceAccountName:'
+        line: '      serviceAccountName: kube-vip'
+
+    - name: Ensure PyYAML is installed (for YAML parse/rewrite)
+      ansible.builtin.apt:
+        name: python3-yaml
+        state: present
+        update_cache: true
+
+    - name: Normalize kube-vip manifest on disk (parse -> modify -> rewrite)
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        python3 <<PY
+        import yaml
+        from pathlib import Path
+
+        path = Path("{{ rke2_manifests_dir }}/kube-vip.yaml")
+        obj = yaml.safe_load(path.read_text())
+
+        # Ensure structure exists
+        obj.setdefault("apiVersion", "apps/v1")
+        obj.setdefault("kind", "DaemonSet")
+        obj.setdefault("metadata", {})
+        obj.setdefault("spec", {})
+        obj["spec"].setdefault("template", {})
+        obj["spec"]["template"].setdefault("metadata", {})
+        obj["spec"]["template"].setdefault("spec", {})
+
+        podspec = obj["spec"]["template"]["spec"]
+
+        # Scheduling: control-plane only
+        podspec.setdefault("nodeSelector", {})
+        podspec["nodeSelector"]["node-role.kubernetes.io/control-plane"] = "true"
+
+        podspec["tolerations"] = [
+            {
+                "key": "node-role.kubernetes.io/control-plane",
+                "operator": "Exists",
+                "effect": "NoSchedule",
+            }
+        ]
+
+        # Service account
+        podspec["serviceAccountName"] = podspec.get("serviceAccountName", "kube-vip")
+
+        # kubernetes_addr env var
+        containers = podspec.get("containers", [])
+        if not containers:
+            raise SystemExit("No containers found")
+
+        idx = 0
+        for i, c in enumerate(containers):
+            if c.get("name") == "kube-vip":
+                idx = i
+                break
+
+        env = containers[idx].get("env", [])
+        env = [e for e in env if e.get("name") != "kubernetes_addr"]
+        env.insert(0, {"name": "kubernetes_addr", "value": "https://127.0.0.1:6443"})
+        containers[idx]["env"] = env
+        podspec["containers"] = containers
+
+        # Write canonical YAML back to disk
+        path.write_text(yaml.safe_dump(obj, sort_keys=False))
+        print(f"Rewrote {path}")
+        PY
+      args:
+        executable: /bin/bash
+
+    - name: Verify Kubernetes API is reachable via kube-vip VIP
+      shell: |
+        curl -k -s -o /dev/null -w "%{http_code}" https://{{ kube_vip_ip }}:6443/healthz
+      register: kubevip_api_health
+      changed_when: false
+      retries: 10
+      delay: 3
+      until: kubevip_api_health.stdout in ["200", "401"]
+      delegate_to: "{{ groups['masters'][0] }}"
+
+    - name: Get kube-vip pods (authoritative)
+      command: >
+        {{ rke2_kubectl }} --kubeconfig {{ rke2_kubeconfig }}
+        get pods -n {{ kubevip_ns }}
+        -l app.kubernetes.io/name=kube-vip-ds
+        -o wide      
+        --no-headers
+      register: kubevip_pods
+      delegate_to: "{{ groups['masters'][0] }}"
+      changed_when: false
+
+    - name: kube-vip installation summary for the first master node
+      debug:
+        msg:
+          - "kube-vip interface: {{ kube_vip_interface }}"
+          - "kube-vip VIP: {{ kube_vip_ip }}"
+          - "kube-vip DaemonSet: kube-vip-ds (present)"
+          - "kube-vip pods: {{ kubevip_pods.stdout_lines | length }}"
+          - "VIP present on host interface: yes"
