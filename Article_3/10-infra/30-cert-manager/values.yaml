@@ -1,0 +1,13 @@
+# cert-manager Helm values
+# Docs: https://cert-manager.io/docs/
+ 
+crds:
+  enabled: true
+ 
+# Create Cloudflare API token secret before first sync:
+#   kubectl create secret generic cloudflare-api-token \
+#     -n cert-manager \
+#     --from-literal=api-token=YOUR_CLOUDFLARE_API_TOKEN
+#
+# Token permissions: Zone / DNS / Edit + Zone / Zone / Read
+# 

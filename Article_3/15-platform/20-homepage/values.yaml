@@ -1,0 +1,236 @@
+image:
+  repository: ghcr.io/gethomepage/homepage
+
+enableRbac: true
+
+serviceAccount:
+  create: true
+
+service:
+  main:
+    ports:
+      http:
+        port: 3000
+
+ingress:
+  main:
+    enabled: false
+
+env:
+  - name: MY_POD_IP
+    valueFrom:
+      fieldRef:
+        fieldPath: status.podIP
+
+  - name: HOMEPAGE_ALLOWED_HOSTS
+    value: home.<your_domain>
+
+config:
+
+  bookmarks: []
+
+  services:
+
+    - Network:
+
+        - OPNsense:
+            icon: opnsense.png
+            href: https://10.0.0.1
+            description: Firewall, routing and VPN gateway
+
+        - NetBird:
+            icon: https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/netbird.png
+            href: https://netbird.<your_domain>
+            description: WireGuard mesh VPN
+
+        - Cloudflare:
+            icon: cloudflare.png
+            href: https://dash.cloudflare.com
+            description: DNS, Tunnel and WAF
+
+    - Infrastructure:
+
+        - Traefik:
+            icon: traefik.png
+            href: https://ingress.<your_domain>
+            description: Ingress controller and dashboard
+            widget:
+              type: traefik
+              url: https://ingress.<your_domain>
+
+        - Proxmox:
+            icon: proxmox.png
+            href: https://10.0.0.4:8006/
+            description: Proxmox VE
+          
+        - Velero UI:
+            icon: https://cdn.jsdelivr.net/gh/selfhst/icons/png/velero.png
+            href: https://velero.<your_domain>
+            description: Kubernetes backup management
+
+        - Azure Key Vault:
+            icon: https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/azure-keyvault.png
+            href: https://portal.azure.com/#@seclab.pl/resource/subscriptions/67493d9d-6df1-4c61-8d94-9aa4fd190946/resourcegroups/<your_domain>-k8s-cluster_rg/providers/microsoft.keyvault/vaults/k8s<your_domain>vault/overview
+            description: Azure Key Vault
+
+        - Rancher:
+            icon: rancher.png
+            href: https://rancher.<your_domain>
+            description: Kubernetes management
+            siteMonitor: https://rancher.<your_domain>
+
+        - Longhorn:
+            icon: longhorn.png
+            href: https://rancher.<your_domain>/k8s/clusters/local/api/v1/namespaces/longhorn-system/services/http:longhorn-frontend:80/proxy/#/dashboard
+            description: Distributed PV Storage [Log in to Rancher to access Longhorn]
+    - Identity:
+
+        - Authentik:
+            icon: authentik.png
+            href: https://authentik.<your_domain>
+            description: Identity Provider and SSO
+
+        - Microsoft Entra:
+            icon: https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/entra-id.png
+            href: https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/~/Overview
+            description: User identity source
+
+    - Documentation:
+
+        - WikiJS:
+            icon: wikijs.png
+            href: https://wiki.<your_domain>
+            description: Documentation portal
+        - Homepage Docs:
+            icon: homepage.png
+            href: https://gethomepage.dev/
+            description: Homepage documentation [this app]
+    - Monitoring:
+
+        - Grafana:
+            icon: grafana.png
+            href: https://grafana.<your_domain>
+            description: Metrics dashboards
+            siteMonitor: https://grafana.<your_domain>
+
+        - Prometheus:
+            icon: prometheus.png
+            description: Metrics collection and alerting
+            widget:
+              type: prometheus
+              url: https://prometheus.<your_domain>/
+            siteMonitor: https://prometheus.<your_domain>/
+
+        - Alertmanager:
+            icon: prometheus.png
+            href: https://alertmanager.<your_domain>
+            description: Alert routing and notification management
+            siteMonitor: https://alertmanager.<your_domain>
+
+    - GitOps:
+
+        - GitLab:
+            icon: gitlab.png
+            href: https://gitlab.<your_domain>
+            description: Source control and GitOps repositories
+            siteMonitor: https://gitlab.<your_domain>
+
+        - ArgoCD:
+            icon: argo-cd.png
+            href: https://argocd.<your_domain>
+            description: GitOps continuous delivery
+            siteMonitor: https://argocd.<your_domain>
+
+    - Learning:
+
+        - CRAPI:
+            icon: https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/tryhackme.png
+            href: https://crapi.<your_domain>
+            description: OWASP Completely Ridiculous API
+            siteMonitor: https://crapi.<your_domain>
+
+        - Juice Shop:
+            icon: https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/tryhackme.png
+            href: https://juice-shop.<your_domain>
+            description: OWASP Juice Shop
+            siteMonitor: https://juice-shop.<your_domain>
+
+        - DVWA:
+            icon: https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/tryhackme.png
+            href: https://dvwa.<your_domain>
+            description: Damn Vulnerable Web Application (credentials - admin/password)
+            siteMonitor: https://dvwa.<your_domain>
+
+    - OffSec:
+
+        - OffSec Wiki:
+            icon: wikipedia.png
+            href: https://offsec-wiki.<your_domain>
+            description: OffSec team wiki
+            siteMonitor: https://offsec-wiki.<your_domain>
+
+        - OffSec Vault:
+            icon: vault.png
+            href: https://offsec-vault.<your_domain>
+            description: OffSec team secrets
+            siteMonitor: https://offsec-vault.<your_domain>
+
+  widgets:
+
+    - resources:
+        backend: resources
+        expanded: true
+        cpu: true
+        memory: true
+
+    - search:
+        provider: duckduckgo
+        target: _blank
+
+    - kubernetes:
+        cluster:
+          show: true
+          cpu: true
+          memory: true
+          showLabel: true
+          label: Cluster
+
+        nodes:
+          show: true
+          cpu: true
+          memory: true
+          showLabel: true
+
+  kubernetes:
+    mode: cluster
+
+  settingsString: |
+    title: <your_domain> Cloud
+    headerStyle: boxed
+    theme: dark
+    color: slate
+
+    layout:
+      Network:
+      Infrastructure:
+      Identity:
+      Documentation:
+      Monitoring:
+      GitOps:
+      Learning:
+      OffSec:
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 200Mi
+
+  limits:
+    cpu: 400m
+    memory: 300Mi
+
+persistence:
+  logs:
+    enabled: true
+    type: emptyDir
+    mountPath: /app/config/logs

@@ -1,0 +1,18 @@
+grafana:
+  enabled: true
+
+  ingress:
+    enabled: false
+
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+
+  podAnnotations:
+    reloader.stakater.com/auto: "true"
+
+  grafana.ini:
+    server:
+      root_url: https://grafana.<your_domain>
+      domain: grafana.<your_domain>

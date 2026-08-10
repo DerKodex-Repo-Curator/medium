@@ -1,0 +1,23 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+
+metadata:
+  name: crapi
+  namespace: crapi
+  annotations:
+    external-dns.alpha.kubernetes.io/target: ingress.<your_domain>
+    kubernetes.io/ingress.class: traefik
+spec:
+
+  entryPoints:
+    - websecure
+
+  routes:
+    - match: Host(`crapi.<your_domain>`)
+      kind: Rule
+
+      services:
+        - name: crapi-web
+          port: 80
+  tls:
+    secretName: crapi-tls

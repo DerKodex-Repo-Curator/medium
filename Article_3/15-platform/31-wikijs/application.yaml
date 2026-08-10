@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+
+metadata:
+  name: wikijs
+  namespace: argocd
+
+  annotations:
+    argocd.argoproj.io/sync-wave: "515"
+
+spec:
+  project: platform
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: wikijs
+
+  sources:
+
+    - repoURL: https://charts.js.wiki
+      chart: wiki
+      targetRevision: 3.0.0
+
+      helm:
+        valueFiles:
+          - $values/15-platform/31-wikijs/values.yaml
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      ref: values
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      path: 15-platform/31-wikijs/config
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

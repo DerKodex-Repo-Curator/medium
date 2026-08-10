@@ -1,0 +1,24 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+
+metadata:
+  name: juice-shop
+  namespace: juice-shop
+  annotations:
+    external-dns.alpha.kubernetes.io/target: ingress.<your_domain>
+    kubernetes.io/ingress.class: traefik
+spec:
+
+  entryPoints:
+    - websecure
+
+  routes:
+    - match: Host(`juice-shop.<your_domain>`)
+      kind: Rule
+
+      services:
+        - name: juice-shop
+          port: 3000
+
+  tls:
+    secretName: juice-shop-tls

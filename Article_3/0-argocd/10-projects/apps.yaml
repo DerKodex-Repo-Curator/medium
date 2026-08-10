@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: apps
+  namespace: argocd
+spec:
+  description: Application workloads only
+  sourceRepos:
+    - "*"
+  destinations:
+    - namespace: "*"
+      server: https://kubernetes.default.svc
+  # Apps MUST NOT manage cluster resources, except Namespace creation (CreateNamespace=true)
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: "external-secrets.io"
+      kind: ClusterExternalSecret

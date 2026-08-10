@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+
+metadata:
+  name: dvwa
+  namespace: argocd
+
+  annotations:
+    argocd.argoproj.io/sync-wave: "2030"
+
+spec:
+  project: learning
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dvwa
+
+  source:
+    repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+    targetRevision: main
+    path: 40-learning/30-dvwa/config
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

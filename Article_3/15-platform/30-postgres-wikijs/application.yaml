@@ -1,0 +1,42 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+
+metadata:
+  name: wikijs-postgresql
+  namespace: argocd
+
+  annotations:
+    argocd.argoproj.io/sync-wave: "510"
+
+spec:
+  project: platform
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: wikijs
+
+  sources:
+
+    - repoURL: https://charts.bitnami.com/bitnami
+      chart: postgresql
+      targetRevision: 18.7.13
+
+      helm:
+        valueFiles:
+          - $values/15-platform/30-postgres-wikijs/values.yaml
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      ref: values
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      path: 15-platform/30-postgres-wikijs/config
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+    syncOptions:
+      - CreateNamespace=true

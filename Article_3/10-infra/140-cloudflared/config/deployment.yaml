@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: cloudflared
+  namespace: cloudflared
+  annotations:
+    reloader.stakater.com/auto: "true"
+
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: cloudflared
+
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+
+    spec:
+
+      # priorityClassName: system-cluster-critical
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: cloudflared
+
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: cloudflared
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: cloudflared
+
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: cloudflared
+
+          image: cloudflare/cloudflared:2026.7.3
+          args:
+            - tunnel
+            - --metrics
+            - 0.0.0.0:2000
+            - --no-autoupdate
+            - run
+            - --token
+            - $(TUNNEL_TOKEN)
+
+
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflared
+                  key: tunnel-token
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 150Mi
+
+            limits:
+              cpu: 400m
+              memory: 400Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+
+            capabilities:
+              drop:
+                - ALL
+
+          livenessProbe:
+            tcpSocket:
+              port: 2000
+            initialDelaySeconds: 30
+            periodSeconds: 30

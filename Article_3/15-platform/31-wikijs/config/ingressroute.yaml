@@ -1,0 +1,24 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+
+metadata:
+  name: wikijs
+  namespace: wikijs
+
+  annotations:
+    external-dns.alpha.kubernetes.io/target: ingress.<your_domain>
+
+spec:
+  entryPoints:
+    - websecure
+
+  routes:
+    - match: Host(`wiki.<your_domain>`)
+      kind: Rule
+
+      services:
+        - name: wikijs
+          port: 80
+
+  tls:
+    secretName: wikijs-tls

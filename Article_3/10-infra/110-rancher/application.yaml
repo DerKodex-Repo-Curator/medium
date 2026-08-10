@@ -1,0 +1,42 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rancher
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "60"
+spec:
+  project: default
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cattle-system
+
+  sources:
+
+    - repoURL: https://releases.rancher.com/server-charts/stable
+      chart: rancher
+      targetRevision: 2.14.3
+
+      helm:
+      # This kubeVersion should be removed when there is a proper support for RKE 1.36 in the version of rancher. 
+        kubeVersion: 1.35.6 
+        valueFiles:
+          - $values/10-infra/110-rancher/values.yaml
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      ref: values
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      path: 10-infra/110-rancher/config
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: issuer-letsencrypt
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "25"
+ 
+spec:
+  project: default
+ 
+  source:
+    repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+    targetRevision: main
+    path: 10-infra/40-issuer-letsencrypt/manifests
+ 
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+ 
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

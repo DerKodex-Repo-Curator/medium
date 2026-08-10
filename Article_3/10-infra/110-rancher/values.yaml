@@ -1,0 +1,24 @@
+hostname: rancher.<your_domain>
+bootstrapPassword: ""
+replicas: 1
+ingress:
+  enabled: false
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+
+auditLog:
+  enabled: true
+privateCA: false
+antiAffinity: preferred
+
+global:
+  cattle:
+    psp:
+      enabled: false

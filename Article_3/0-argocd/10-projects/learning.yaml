@@ -1,0 +1,48 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+
+metadata:
+  name: learning
+  namespace: argocd
+
+spec:
+
+  description: Learning workloads only
+
+  sourceRepos:
+    - '*'
+
+  destinations:
+
+    # ArgoCD Applications
+    - namespace: argocd
+      server: https://kubernetes.default.svc
+
+
+    - namespace: juice-shop
+      server: https://kubernetes.default.svc
+
+    - namespace: crapi
+      server: https://kubernetes.default.svc
+
+    - namespace: dvwa
+      server: https://kubernetes.default.svc
+
+    - namespace: owasp-llm-bench
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+
+ 
+    - group: ""
+      kind: Namespace
+
+   
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"

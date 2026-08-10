@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd-root-applications
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-300"
+spec:
+  project: default
+  source:
+    repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+    targetRevision: main
+    path: 0-argocd/20-applications
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

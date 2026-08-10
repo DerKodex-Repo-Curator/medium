@@ -1,0 +1,42 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+
+metadata:
+  name: gitlab-runner
+  namespace: argocd
+
+  annotations:
+    argocd.argoproj.io/sync-wave: "540"
+
+spec:
+  project: platform
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gitlab-runner
+
+  sources:
+
+    - repoURL: https://charts.gitlab.io
+      chart: gitlab-runner
+      targetRevision: 0.91.0
+
+      helm:
+        valueFiles:
+          - $values/15-platform/40-gitlab-runner/values.yaml
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      ref: values
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      path: 15-platform/40-gitlab-runner/config
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+    syncOptions:
+      - CreateNamespace=true

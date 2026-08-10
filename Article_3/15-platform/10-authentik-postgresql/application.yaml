@@ -1,0 +1,42 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+
+metadata:
+  name: authentik-postgresql
+  namespace: argocd
+
+  annotations:
+    argocd.argoproj.io/sync-wave: "505"
+
+spec:
+  project: platform
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: authentik
+
+  sources:
+
+    - repoURL: https://charts.bitnami.com/bitnami
+      chart: postgresql
+      targetRevision: 18.7.13
+
+      helm:
+        valueFiles:
+          - $values/15-platform/10-authentik-postgresql/values.yaml
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      ref: values
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      path: 15-platform/10-authentik-postgresql/config
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+    syncOptions:
+      - CreateNamespace=true

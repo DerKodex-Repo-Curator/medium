@@ -1,0 +1,37 @@
+ingress:
+  enabled: false
+
+postgresql:
+  enabled: false
+
+extraEnvVars:
+  - name: DB_HOST
+    value: wikijs-postgresql
+
+  - name: DB_PORT
+    value: "5432"
+
+  - name: DB_USER
+    value: wikijs
+
+  - name: DB_NAME
+    value: wikijs
+
+  - name: DB_PASS
+    valueFrom:
+      secretKeyRef:
+        name: wikijs-postgresql-secret
+        key: wikijs-user-password
+  - name: APP_URL
+    value: https://wiki.<your_domain>
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+
+podAnnotations:
+  reloader.stakater.com/auto: "true"

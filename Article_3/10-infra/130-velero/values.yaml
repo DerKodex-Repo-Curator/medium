@@ -1,0 +1,61 @@
+image:
+  repository: docker.io/velero/velero
+  tag: v1.18.1
+
+credentials:
+  useSecret: true
+  existingSecret: velero-azure-credentials
+
+initContainers:
+  - name: velero-plugin-for-microsoft-azure
+    image: velero/velero-plugin-for-microsoft-azure:v1.14.2
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+configuration:
+
+  backupStorageLocation:
+    - name: default
+      provider: azure
+
+      bucket: velero
+
+      default: true
+
+      credential:
+        name: velero-azure-credentials
+        key: cloud
+
+      config:
+        storageAccount: <your_domain>blobbackup
+        resourceGroup: <your_domain>-k8s-cluster_RG
+        subscriptionId: 67493d9d-6df1-4c61-8d94-9aa4fd190946
+
+  uploaderType: kopia
+
+  defaultBackupStorageLocation: default
+
+snapshotsEnabled: false
+
+deployNodeAgent: true
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+serviceAccount:
+  server:
+    create: true
+
+rbac:
+  create: true
+
+metrics:
+  enabled: true

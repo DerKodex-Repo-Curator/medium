@@ -1,0 +1,98 @@
+replicaCount: 1
+
+image:
+  repository: otwld/velero-ui
+  tag: 0.10.2
+  pullPolicy: IfNotPresent
+
+podAnnotations:
+  secret.reloader.stakater.com/reload: "velero-ui-admin"
+
+configuration:
+  general:
+    secretPassPhrase:
+      useSecret: true
+      existingSecret: velero-ui-passphrase
+      key: pass_phrase
+
+    veleroNamespace: velero
+  policies:
+    enabled: true
+
+    useConfigMap: true
+
+    value: |
+      g,velero-admins,manage,all
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: false
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+env:
+  - name: BASIC_AUTH_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: velero-ui-admin
+        key: username
+
+  - name: BASIC_AUTH_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: velero-ui-admin
+        key: password
+
+
+  - name: OAUTH_AUTH_ENABLED
+    value: "true"
+
+  - name: OAUTH_NAME
+    value: "Authentik"
+
+  - name: OAUTH_GROUP_CLAIM
+    value: "groups"
+
+  - name: OAUTH_OAUTH_SCOPE
+    value: "openid profile email"
+
+  - name: OAUTH_REDIRECT_URI
+    value: "https://velero.<your_domain>/login"
+
+  - name: OAUTH_AUTHORIZATION_URL
+    value: "https://auth.<your_domain>/application/o/authorize/"
+
+  - name: OAUTH_TOKEN_URL
+    value: "https://auth.<your_domain>/application/o/token/"
+
+  - name: OAUTH_USER_INFO_URL
+    value: "https://auth.<your_domain>/application/o/userinfo/"
+
+  - name: OAUTH_CLIENT_ID
+    valueFrom:
+      secretKeyRef:
+        name: velero-ui-oauth
+        key: client-id
+
+  - name: OAUTH_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: velero-ui-oauth
+        key: client-secret
+
+envFrom: []
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

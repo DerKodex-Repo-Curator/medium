@@ -1,0 +1,38 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+
+metadata:
+  name: gitlab-cr-auth
+  namespace: argocd
+
+  annotations:
+    argocd.argoproj.io/sync-wave: "77"
+
+spec:
+
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jqPathExpressions:
+        - '.spec.data[].remoteRef.conversionStrategy'
+        - '.spec.data[].remoteRef.decodingStrategy'
+        - '.spec.data[].remoteRef.metadataPolicy'
+
+  project: infra
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gitlab-backup
+
+  source:
+    repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+    targetRevision: main
+    path: 10-infra/145-gitlab-cr-auth/config
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+    syncOptions:
+      - ServerSideApply=true

@@ -1,0 +1,19 @@
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 150m
+      memory: 200Mi
+
+speaker:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 200Mi
+
+crds:
+  enabled: true
+
+prometheus:
+  enabled: false

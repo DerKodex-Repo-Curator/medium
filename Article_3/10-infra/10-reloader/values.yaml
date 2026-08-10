@@ -1,0 +1,29 @@
+# Stakater Reloader Helm values
+# Purpose:
+#   Restart workloads when Kubernetes Secrets or ConfigMaps change.
+#
+# In this platform:
+#   Azure Key Vault
+#     -> External Secrets Operator
+#     -> Kubernetes Secret
+#     -> Reloader
+#     -> Deployment/StatefulSet rollout
+
+reloader:
+  # Watch all namespaces.
+  # This is needed because ESO-created secrets will exist in many app namespaces,
+  # for example monitoring, keycloak, portainer, longhorn-system, etc.
+  watchGlobally: true
+
+  # Important for ArgoCD.
+  # The default env-vars strategy can make ArgoCD mark apps OutOfSync.
+  # The annotations strategy updates pod template annotations instead.
+  reloadStrategy: annotations
+
+  # Set to true only if you use Argo Rollouts CRDs.
+  # You are using ArgoCD, but that is not the same as Argo Rollouts.
+  isArgoRollouts: false
+
+  # Keep reload scope focused on long-running workloads.
+  ignoreJobs: true
+  ignoreCronJobs: true

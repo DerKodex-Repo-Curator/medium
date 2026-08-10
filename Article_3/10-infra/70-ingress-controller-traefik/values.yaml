@@ -1,0 +1,55 @@
+# Traefik Helm values
+# Reference: https://doc.traefik.io/traefik/
+ 
+
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+ 
+additionalArguments:
+  - "--api.dashboard=true"
+  - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+  - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+  - "--entrypoints.cloudflared.address=:9080"
+  - "--entrypoints.cloudflared.forwardedHeaders.insecure=true"
+providers:
+  kubernetesIngress: {}
+  kubernetesCRD: {}
+ 
+service:
+  type: LoadBalancer
+  annotations:
+    metallb.io/loadBalancerIPs: "10.0.0.245"
+    external-dns.alpha.kubernetes.io/hostname: ingress.<your_domain>
+    
+ingressRoute:
+  dashboard:
+    enabled: true
+    entryPoints:
+      - websecure
+    matchRule: >
+          Host(`ingress.<your_domain>`)
+    tls:
+      secretName: traefik-tls
+ 
+rbac:
+  enabled: true
+ 
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+ 
+persistence:
+  enabled: false
+
+ports:
+  cloudflared:
+    port: 9080
+    expose:
+      default: true
+    exposedPort: 9080
+    protocol: TCP

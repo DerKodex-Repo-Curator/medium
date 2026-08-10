@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: velero-ui
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "80"
+
+spec:
+  project: infra
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: velero-ui
+
+  sources:
+
+    - repoURL: https://helm.otwld.com/
+      chart: velero-ui
+      targetRevision: 0.15.0
+      helm:
+        valueFiles:
+          - $values/10-infra/135-velero-ui/values.yaml
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      ref: values
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      path: 10-infra/135-velero-ui/config
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

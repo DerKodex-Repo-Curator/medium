@@ -1,0 +1,44 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+
+metadata:
+  name: crapi
+  namespace: argocd
+
+  annotations:
+    argocd.argoproj.io/sync-wave: "2010"
+
+spec:
+  project: learning
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: crapi
+
+  sources:
+
+    # Helm Chart CRAPI
+    - repoURL: https://github.com/OWASP/crAPI.git
+      targetRevision: v1.1.6
+      path: deploy/helm
+
+      helm:
+        valueFiles:
+          - $values/40-learning/10-crapi/values.yaml
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      ref: values
+
+    - repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+      targetRevision: main
+      path: 40-learning/10-crapi/config
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

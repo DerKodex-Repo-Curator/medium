@@ -1,0 +1,16 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+
+metadata:
+  name: juice-shop
+  namespace: juice-shop
+
+spec:
+  secretName: juice-shop-tls
+
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+
+  dnsNames:
+    - juice-shop.<your_domain>

@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metallb-config
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "35"
+spec:
+  project: infra
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: metallb-system
+
+  source:
+    repoURL: https://gitlab.<your_domain>/cloud-team/<your_domain>-infra/gitops.git
+    targetRevision: main
+    path: 10-infra/60-metallb-config/config
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - SkipDryRunOnMissingResource=true

@@ -1,0 +1,23 @@
+provider:
+  name: cloudflare
+
+sources:
+  - ingress
+  - service
+  - traefik-proxy
+
+policy: sync
+
+registry: txt
+
+txtOwnerId: <your_domain>-k8s
+logLevel: debug
+env:
+  - name: CF_API_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: cloudflare-api-token
+        key: api-token
+
+domainFilters:
+  - <your_domain>

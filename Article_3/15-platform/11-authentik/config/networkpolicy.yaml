@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+
+metadata:
+  name: authentik-isolation
+  namespace: authentik
+
+spec:
+
+  podSelector: {}
+
+  policyTypes:
+    - Ingress
+
+  ingress:
+
+    # internal authentik communication
+    - from:
+        - podSelector: {}
+
+    # traefik
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik

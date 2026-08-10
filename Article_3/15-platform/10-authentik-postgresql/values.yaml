@@ -1,0 +1,41 @@
+auth:
+  username: authentik
+  database: authentik
+
+  existingSecret: authentik-postgresql-secret
+
+
+  secretKeys:
+    adminPasswordKey: postgres-admin-password
+    userPasswordKey: authentik-user-password
+
+primary:
+
+  podAnnotations:
+    reloader.stakater.com/auto: "true"
+
+  persistence:
+    enabled: true
+    storageClass: longhorn
+    size: 20Gi
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+
+    limits:
+      cpu: 1500m
+      memory: 2Gi
+
+metrics:
+  enabled: true
+
+  serviceMonitor:
+    enabled: true
+
+volumePermissions:
+  enabled: true
+
+networkPolicy:
+  enabled: true

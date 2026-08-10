@@ -1,0 +1,92 @@
+authentik:
+  log_level: info
+
+postgresql:
+  enabled: false
+
+redis:
+  enabled: true
+
+  master:
+    persistence:
+      enabled: true
+      storageClass: longhorn
+      size: 4Gi
+
+server:
+
+  ingress:
+    enabled: false
+
+  metrics:
+    enabled: true
+
+  env:
+
+    - name: AUTHENTIK_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: authentik-secret
+          key: AUTHENTIK_SECRET_KEY
+
+    - name: AUTHENTIK_POSTGRESQL__HOST
+      value: authentik-postgresql.authentik.svc.cluster.local
+
+    - name: AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS
+      value: "172.16.0.0/12"
+
+    - name: AUTHENTIK_POSTGRESQL__PORT
+      value: "5432"
+
+    - name: AUTHENTIK_POSTGRESQL__NAME
+      value: authentik
+
+    - name: AUTHENTIK_POSTGRESQL__USER
+      value: authentik
+
+    - name: AUTHENTIK_POSTGRESQL__PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: authentik-postgresql-secret
+          key: authentik-user-password
+
+  podAnnotations:
+    reloader.stakater.com/auto: "true"
+
+worker:
+
+  env:
+
+    - name: AUTHENTIK_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: authentik-secret
+          key: AUTHENTIK_SECRET_KEY
+
+    - name: AUTHENTIK_POSTGRESQL__HOST
+      value: authentik-postgresql.authentik.svc.cluster.local
+
+    - name: AUTHENTIK_POSTGRESQL__PORT
+      value: "5432"
+
+    - name: AUTHENTIK_POSTGRESQL__NAME
+      value: authentik
+
+    - name: AUTHENTIK_POSTGRESQL__USER
+      value: authentik
+    - name: AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS
+      value: "172.16.0.0/12"
+      
+    - name: AUTHENTIK_POSTGRESQL__PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: authentik-postgresql-secret
+          key: authentik-user-password
+
+
+  podAnnotations:
+    reloader.stakater.com/auto: "true"
+
+global:
+  podAnnotations:
+    reloader.stakater.com/auto: "true"

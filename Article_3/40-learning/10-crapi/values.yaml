@@ -1,0 +1,21 @@
+service:
+  type: ClusterIP
+mongodb:
+  image: mongo
+  version: 4.4.29
+  persistence:
+    enabled: false
+    
+postgresdb:
+  persistence:
+    enabled: false
+
+mailhog:
+  enabled: true
+
+jwtSecret: "crapi"
+
+enableLog4j: true
+enableShellInjection: true
+waitForK8sResources:
+  enabled: false
