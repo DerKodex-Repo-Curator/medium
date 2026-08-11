@@ -1,0 +1,68 @@
+- name: Bootstrap SSH access for Ansible
+  hosts: netbird_agents
+  become: true
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Ensure ansible user exists
+      user:
+        name: "{{ ansible_user }}"
+        shell: /bin/bash
+        create_home: true
+
+    - name: Install SSH authorized key
+      authorized_key:
+        user: "{{ ansible_user }}"
+        key: "{{ lookup('file', playbook_dir + '/../keys/ansible_ed25519.pub') }}"
+        state: present
+        exclusive: true
+
+
+- name: Harden sshd configuration
+  hosts: netbird_agents
+  become: true
+  gather_facts: no
+  
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: SSH hardening block
+      block:
+        - name: Disable root SSH login
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            regexp: '^#?PermitRootLogin'
+            line: 'PermitRootLogin no'
+
+        - name: Limit authentication attempts
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            regexp: '^#?MaxAuthTries'
+            line: 'MaxAuthTries 15'
+
+        - name: Reduce login grace time
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            regexp: '^#?LoginGraceTime'
+            line: 'LoginGraceTime 2'
+
+        - name: Disable unused SSH features
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            regexp: '^#?{{ item.key }}'
+            line: '{{ item.key }} {{ item.value }}'
+          loop:
+            - { key: 'X11Forwarding', value: 'no' }
+            - { key: 'AllowTcpForwarding', value: 'no' }
+            - { key: 'PermitTunnel', value: 'no' }
+
+        - name: Validate sshd configuration
+          command: sshd -t
+
+        - name: Reload sshd safely
+          service:
+            name: ssh
+            state: reloaded

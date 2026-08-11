@@ -1,0 +1,62 @@
+ansible_user: cloud
+ansible_python_interpreter: /usr/bin/python3
+
+public_key_path: keys/ansible_ed25519.pub
+
+ansible_ssh_private_key_file: "{{ playbook_dir }}/../keys/ansible_ed25519"
+
+dns_nameservers:
+  - 1.1.1.1
+  - 8.8.8.8
+
+##############################################################################
+# NETBIRD SERVER
+##############################################################################
+
+netbird_domain: netbird.<your_domain>.pl
+netbird_admin_email: <your-email>@gmail.com
+
+netbird_version: "v0.76.0"
+
+netbird_linux_user: cloud
+
+netbird_base_dir: "/home/{{ netbird_linux_user }}/netbird"
+
+netbird_install_dir: "{{ netbird_base_dir }}"
+netbird_secrets_dir: "{{ netbird_base_dir }}/secrets"
+netbird_letsencrypt_dir: "{{ netbird_base_dir }}/letsencrypt"
+
+netbird_compose_file: "{{ netbird_install_dir }}/docker-compose.yml"
+netbird_config_file: "{{ netbird_install_dir }}/config.yaml"
+
+netbird_cloudflare_env_file: "{{ netbird_secrets_dir }}/cloudflare.env"
+netbird_acme_file: "{{ netbird_letsencrypt_dir }}/acme.json"
+
+netbird_required_packages:
+  - docker.io
+  - docker-compose-v2
+  - ca-certificates
+  - curl
+  - jq
+  - python3
+  - python3-pip
+
+netbird_enable_ipv4_forwarding: true
+
+netbird_open_ports:
+  tcp:
+    - 80
+    - 443
+  udp:
+    - 3478
+
+##############################################################################
+# NETBIRD AGENT / SUBNET ROUTER
+##############################################################################
+netbird_domain: netbird.<your_domain>.pl
+netbird_server_ip: 10.0.0.200
+
+netbird_agent_version: "0.76.0"
+netbird_agent_install_dir: /home/netbird-agent
+
+netbird_agent_reset_state: true

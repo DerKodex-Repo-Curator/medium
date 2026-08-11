@@ -1,0 +1,283 @@
+- name: Install self-hosted NetBird from static config
+  hosts: netbird_instance
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+
+    ########################################################################
+    # PRE-FLIGHT
+    ########################################################################
+
+    - name: Validate supported Ubuntu version
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_major_version | int >= 22
+        fail_msg: "Ubuntu 22.04+ is required"
+        success_msg: "Supported Ubuntu version detected"
+
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - netbird_domain | length > 3
+          - netbird_admin_email | length > 5
+          - vault_cloudflare_dns_api_token is defined
+          - vault_cloudflare_dns_api_token | length > 10
+        fail_msg: "Required variables are missing"
+
+    ########################################################################
+    # PACKAGES
+    ########################################################################
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name: "{{ netbird_required_packages }}"
+        state: present
+
+    - name: Ensure docker service is enabled
+      ansible.builtin.service:
+        name: docker
+        enabled: true
+        state: started
+
+    ########################################################################
+    # USER
+    ########################################################################
+
+    - name: Ensure NetBird user exists
+      ansible.builtin.user:
+        name: "{{ netbird_linux_user }}"
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Add user to docker group
+      ansible.builtin.user:
+        name: "{{ netbird_linux_user }}"
+        groups: docker
+        append: true
+
+    ########################################################################
+    # DIRECTORIES
+    ########################################################################
+
+    - name: Create required directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ netbird_linux_user }}"
+        group: "{{ netbird_linux_user }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ netbird_install_dir }}", mode: "0750" }
+        - { path: "{{ netbird_secrets_dir }}", mode: "0700" }
+        - { path: "{{ netbird_letsencrypt_dir }}", mode: "0750" }
+
+    - name: Create acme.json
+      ansible.builtin.file:
+        path: "{{ netbird_acme_file }}"
+        state: touch
+        owner: "{{ netbird_linux_user }}"
+        group: "{{ netbird_linux_user }}"
+        mode: "0600"
+
+    ########################################################################
+    # SYSCTL
+    ########################################################################
+
+    - name: Enable IPv4 forwarding
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-netbird.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          net.ipv4.ip_forward=1
+      when: netbird_enable_ipv4_forwarding | bool
+
+    - name: Reload sysctl
+      ansible.builtin.command: sysctl --system
+      changed_when: false
+
+    ########################################################################
+    # CLOUDFLARE ENV
+    ########################################################################
+
+    - name: Create cloudflare env
+      ansible.builtin.copy:
+        dest: "{{ netbird_cloudflare_env_file }}"
+        owner: "{{ netbird_linux_user }}"
+        group: "{{ netbird_linux_user }}"
+        mode: "0600"
+        content: |
+          CF_DNS_API_TOKEN={{ vault_cloudflare_dns_api_token }}
+
+    ########################################################################
+    # COPY STATIC FILES
+    ########################################################################
+
+    - name: Copy docker-compose.yml
+      ansible.builtin.copy:
+        src: ../files/netbird/docker-compose.yml
+        dest: "{{ netbird_compose_file }}"
+        owner: "{{ netbird_linux_user }}"
+        group: "{{ netbird_linux_user }}"
+        mode: "0644"
+
+    - name: Create NetBird config
+      ansible.builtin.template:
+        src: ../files/netbird/config.yaml.j2
+        dest: "{{ netbird_config_file }}"
+        owner: "{{ netbird_linux_user }}"
+        group: "{{ netbird_linux_user }}"
+        mode: "0600"
+
+    - name: Create dashboard env
+      ansible.builtin.template:
+        src: ../files/netbird/dashboard.env.j2
+        dest: "{{ netbird_install_dir }}/dashboard.env"
+        owner: "{{ netbird_linux_user }}"
+        group: "{{ netbird_linux_user }}"
+        mode: "0644"
+
+    ########################################################################
+    # PERMISSIONS
+    ########################################################################
+
+    - name: Ensure ownership
+      ansible.builtin.file:
+        path: "{{ netbird_install_dir }}"
+        owner: "{{ netbird_linux_user }}"
+        group: "{{ netbird_linux_user }}"
+        recurse: true
+
+    - name: Ensure acme.json permissions
+      ansible.builtin.file:
+        path: "{{ netbird_acme_file }}"
+        owner: "{{ netbird_linux_user }}"
+        group: "{{ netbird_linux_user }}"
+        mode: "0600"
+
+    ########################################################################
+    # VALIDATE COMPOSE
+    ########################################################################
+
+    - name: Validate compose syntax
+      ansible.builtin.command:
+        cmd: docker compose config -q
+        chdir: "{{ netbird_install_dir }}"
+      changed_when: false
+
+    ########################################################################
+    # DEPLOY
+    ########################################################################
+
+    - name: Pull images
+      ansible.builtin.command:
+        cmd: docker compose pull
+        chdir: "{{ netbird_install_dir }}"
+      register: compose_pull
+      changed_when: false
+
+    - name: Deploy stack
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: "{{ netbird_install_dir }}"
+      register: compose_up
+      changed_when: false
+
+    ########################################################################
+    # VALIDATION
+    ########################################################################
+
+    - name: Wait for containers
+      ansible.builtin.pause:
+        seconds: 20
+
+    - name: Get running containers
+      ansible.builtin.command:
+        cmd: docker ps --format '{{ "{{" }}.Names{{ "}}" }}'
+      register: docker_ps
+      changed_when: false
+
+    - name: Show containers
+      ansible.builtin.debug:
+        var: docker_ps.stdout_lines
+
+    - name: Validate required containers
+      ansible.builtin.assert:
+        that:
+          - "'netbird-traefik' in docker_ps.stdout"
+          - "'netbird-dashboard' in docker_ps.stdout"
+          - "'netbird-server' in docker_ps.stdout"
+        fail_msg: "Required NetBird containers are not running"
+        success_msg: "NetBird stack is running"
+
+    - name: Validate dashboard through Traefik
+      ansible.builtin.command:
+        cmd: >
+          curl -k -s
+          -o /tmp/netbird-check.html
+          -w '%{http_code}'
+          https://localhost/
+          -H 'Host: {{ netbird_domain }}'
+      register: dashboard_check
+      changed_when: false
+
+    - name: Assert dashboard returns 200
+      ansible.builtin.assert:
+        that:
+          - dashboard_check.stdout == "200"
+        fail_msg: "Dashboard validation failed"
+        success_msg: "Dashboard validation passed"
+
+    - name: Show compose status
+      ansible.builtin.command:
+        cmd: docker compose ps
+        chdir: "{{ netbird_install_dir }}"
+      register: compose_ps
+      changed_when: false
+
+    - name: Display compose status
+      ansible.builtin.debug:
+        var: compose_ps.stdout_lines
+
+    - name: Show server logs
+      ansible.builtin.command:
+        cmd: docker logs netbird-server --tail 50
+      register: server_logs
+      failed_when: false
+      changed_when: false
+
+    - name: Recreate Traefik
+      ansible.builtin.command:
+        cmd: docker compose up -d --force-recreate traefik
+        chdir: "{{ netbird_install_dir }}"
+      changed_when: true
+
+    - name: Print server logs
+      ansible.builtin.debug:
+        var: server_logs.stdout_lines
+
+    - name: Show traefik logs
+      ansible.builtin.command:
+        cmd: docker logs netbird-traefik --tail 50
+      register: traefik_logs
+      failed_when: false
+      changed_when: false
+
+    - name: Print traefik logs
+      ansible.builtin.debug:
+        var: traefik_logs.stdout_lines
+
+  

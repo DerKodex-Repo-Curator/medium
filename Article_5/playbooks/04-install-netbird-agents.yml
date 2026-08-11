@@ -1,0 +1,186 @@
+- name: Install NetBird routing agents
+  hosts: netbird_agents
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  vars:
+    netbird_deb_file: "netbird_{{ netbird_agent_version }}_linux_amd64.deb"
+    netbird_deb_url: "https://github.com/netbirdio/netbird/releases/download/v{{ netbird_agent_version }}/{{ netbird_deb_file }}"
+    netbird_deb_path: "/tmp/{{ netbird_deb_file }}"
+
+    netbird_setup_key: "{{ vault_netbird_agent_setup_keys[inventory_hostname] }}"
+
+  tasks:
+
+    #####################################################################
+    # VALIDATION
+    #####################################################################
+
+    - name: Validate setup key exists
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname in vault_netbird_agent_setup_keys
+        fail_msg: "Missing setup key for {{ inventory_hostname }}"
+
+    #####################################################################
+    # PACKAGES
+    #####################################################################
+
+    - name: Update apt
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Install prereqs
+      ansible.builtin.apt:
+        state: present
+        name:
+          - curl
+          - wget
+          - ca-certificates
+          - jq
+          - iproute2
+          - iptables
+          - nftables
+
+    #####################################################################
+    # HOSTNAME
+    #####################################################################
+
+    - name: Set hostname
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+    #####################################################################
+    # HOSTS
+    #####################################################################
+
+    - name: Configure NetBird hostname locally
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} NETBIRD"
+        block: |
+          {{ netbird_server_ip }} {{ netbird_domain }}
+
+    #####################################################################
+    # ROUTING
+    #####################################################################
+
+    - name: Enable IPv4 forwarding
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-netbird-router.conf
+        mode: "0644"
+        content: |
+          net.ipv4.ip_forward=1
+          net.ipv4.conf.all.src_valid_mark=1
+
+    - name: Reload sysctl
+      ansible.builtin.command: sysctl --system
+      changed_when: false
+
+    #####################################################################
+    # CLEANUP
+    #####################################################################
+
+    - name: Disconnect old peer
+      ansible.builtin.command: netbird down
+      failed_when: false
+      changed_when: false
+      when: netbird_agent_reset_state | bool
+
+    - name: Stop netbird
+      ansible.builtin.service:
+        name: netbird
+        state: stopped
+      failed_when: false
+      when: netbird_agent_reset_state | bool
+
+    - name: Remove old state
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/netbird
+        - /etc/netbird
+      when: netbird_agent_reset_state | bool
+
+    #####################################################################
+    # DOWNLOAD
+    #####################################################################
+
+    - name: Download NetBird
+      ansible.builtin.get_url:
+        url: "{{ netbird_deb_url }}"
+        dest: "{{ netbird_deb_path }}"
+        mode: "0644"
+
+    #####################################################################
+    # INSTALL
+    #####################################################################
+
+    - name: Install NetBird package
+      ansible.builtin.command:
+        cmd: "dpkg -i {{ netbird_deb_path }}"
+      register: dpkg_install
+      changed_when: true
+
+    - name: Fix dependencies
+      ansible.builtin.apt:
+        state: fixed
+
+    - name: Start service
+      ansible.builtin.service:
+        name: netbird
+        enabled: true
+        state: started
+
+    #####################################################################
+    # CONNECT
+    #####################################################################
+
+    - name: Connect to NetBird
+      ansible.builtin.command:
+        cmd: >
+          netbird up
+          --management-url https://{{ netbird_domain }}
+          --setup-key {{ netbird_setup_key }}
+      register: netbird_up
+      changed_when: true
+      no_log: true
+
+    #####################################################################
+    # VALIDATION
+    #####################################################################
+
+    - name: Wait for initialization
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: NetBird status
+      ansible.builtin.command:
+        cmd: netbird status
+      register: nb_status
+      changed_when: false
+
+    - name: Show status
+      ansible.builtin.debug:
+        var: nb_status.stdout_lines
+
+    - name: Validate connected
+      ansible.builtin.assert:
+        that:
+          - "'Management: Connected' in nb_status.stdout"
+          - "'Signal: Connected' in nb_status.stdout"
+
+    - name: Validate route table
+      ansible.builtin.command:
+        cmd: ip route
+      register: route_table
+      changed_when: false
+
+    - name: Show routes
+      ansible.builtin.debug:
+        var: route_table.stdout_lines
