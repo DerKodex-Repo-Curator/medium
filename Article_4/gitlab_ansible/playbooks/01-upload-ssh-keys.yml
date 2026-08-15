@@ -1,0 +1,22 @@
+- name: Bootstrap SSH access for Ansible
+  hosts: all
+  become: true
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Ensure ansible user exists
+      user:
+        name: "{{ ansible_user }}"
+        shell: /bin/bash
+        create_home: true
+
+    - name: Install SSH authorized key
+      authorized_key:
+        user: "{{ ansible_user }}"
+        key: "{{ lookup('file', playbook_dir + '/../keys/ansible_ed25519.pub') }}"
+        state: present
+        exclusive: true
+
+

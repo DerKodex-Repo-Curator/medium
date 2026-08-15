@@ -1,0 +1,178 @@
+---
+- name: Test GitLab connectivity to PostgreSQL
+  hosts: gitlab
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+
+    # --------------------------------------------------
+    # PostgreSQL client
+    # --------------------------------------------------
+
+    - name: Install PostgreSQL client
+      apt:
+        name:
+          - postgresql-client
+        state: present
+        update_cache: true
+
+    # --------------------------------------------------
+    # DNS Resolution
+    # --------------------------------------------------
+
+    - name: Verify DNS resolution
+      command: getent hosts gitlab-postgres.<your_domain>
+      register: dns_result
+      changed_when: false
+
+    - name: Show DNS resolution
+      debug:
+        var: dns_result.stdout
+
+    - name: Assert DNS resolution works
+      assert:
+        that:
+          - dns_result.rc == 0
+        fail_msg: "Unable to resolve gitlab-postgres.<your_domain>"
+        success_msg: "DNS resolution successful"
+
+    # --------------------------------------------------
+    # Network Connectivity
+    # --------------------------------------------------
+
+    - name: Verify TCP connectivity to PostgreSQL
+      wait_for:
+        host: "{{ postgres_host }}"
+        port: "{{ postgres_port }}"
+        timeout: 5
+
+    # --------------------------------------------------
+    # Database Login Test
+    # --------------------------------------------------
+
+    - name: Test database login
+      shell: |
+        PGPASSWORD='{{ vault_gitlab_db_password }}' \
+        psql \
+          --host={{ postgres_host }} \
+          --port={{ postgres_port }} \
+          --username={{ gitlab_db_user }} \
+          --dbname={{ gitlab_db_name }} \
+          --no-password \
+          --tuples-only \
+          --command="SELECT current_database();"
+      register: psql_test
+      changed_when: false
+
+    - name: Show database test result
+      debug:
+        msg: "{{ psql_test.stdout | trim }}"
+
+    - name: Assert login works
+      assert:
+        that:
+          - gitlab_db_name in psql_test.stdout
+        fail_msg: "GitLab cannot connect to PostgreSQL"
+        success_msg: "GitLab can connect to PostgreSQL"
+
+    # --------------------------------------------------
+    # PostgreSQL Version
+    # --------------------------------------------------
+
+    - name: Get PostgreSQL version
+      shell: |
+        PGPASSWORD='{{ vault_gitlab_db_password }}' \
+        psql \
+          --host={{ postgres_host }} \
+          --port={{ postgres_port }} \
+          --username={{ gitlab_db_user }} \
+          --dbname={{ gitlab_db_name }} \
+          --no-password \
+          --tuples-only \
+          --command="SHOW server_version;"
+      register: postgres_version_result
+      changed_when: false
+
+    - name: Display PostgreSQL version
+      debug:
+        msg: "PostgreSQL server version: {{ postgres_version_result.stdout | trim }}"
+
+    - name: Assert PostgreSQL major version
+      assert:
+        that:
+          - postgres_version_result.stdout | trim is match('^' ~ postgres_version ~ '\\.')
+        fail_msg: >
+          Expected PostgreSQL {{ postgres_version }}
+          but got {{ postgres_version_result.stdout | trim }}
+        success_msg: >
+          PostgreSQL {{ postgres_version }} detected
+
+    # --------------------------------------------------
+    # Database Encoding
+    # --------------------------------------------------
+
+    - name: Verify database encoding
+      shell: |
+        PGPASSWORD='{{ vault_gitlab_db_password }}' \
+        psql \
+          --host={{ postgres_host }} \
+          --port={{ postgres_port }} \
+          --username={{ gitlab_db_user }} \
+          --dbname={{ gitlab_db_name }} \
+          --no-password \
+          --tuples-only \
+          --command="
+            SELECT pg_encoding_to_char(encoding)
+            FROM pg_database
+            WHERE datname='{{ gitlab_db_name }}';
+          "
+      register: encoding_result
+      changed_when: false
+
+    - name: Assert UTF8 encoding
+      assert:
+        that:
+          - "'UTF8' in encoding_result.stdout"
+        fail_msg: "Database is not UTF8 encoded"
+        success_msg: "Database encoding is UTF8"
+
+    # --------------------------------------------------
+    # PostgreSQL Readiness
+    # --------------------------------------------------
+
+    - name: Verify PostgreSQL readiness
+      command: >
+        pg_isready
+        -h {{ postgres_host }}
+        -p {{ postgres_port }}
+        -U {{ gitlab_db_user }}
+      register: pg_ready
+      changed_when: false
+
+    - name: Assert PostgreSQL is ready
+      assert:
+        that:
+          - pg_ready.rc == 0
+        fail_msg: "PostgreSQL is not ready"
+        success_msg: "PostgreSQL is ready"
+
+    # --------------------------------------------------
+    # Summary
+    # --------------------------------------------------
+
+    - name: Display validation summary
+      debug:
+        msg:
+          - "DNS resolution: OK"
+          - "Network connectivity: OK"
+          - "Database login: OK"
+          - "Database: {{ gitlab_db_name }}"
+          - "User: {{ gitlab_db_user }}"
+          - "Encoding: UTF8"
+          - "PostgreSQL {{ postgres_version }}: OK"
+          - "Ready for GitLab installation"

@@ -1,0 +1,29 @@
+ansible_user: cloud
+ansible_python_interpreter: /usr/bin/python3
+
+public_key_path: keys/ansible_ed25519.pub
+ansible_ssh_private_key_file: "{{ playbook_dir }}/../keys/ansible_ed25519"
+
+dns_nameservers:
+  - 1.1.1.1
+  - 8.8.8.8
+
+gitlab_hostname: gitlab.<your_domain>
+gitlab_external_url: https://gitlab.<your_domain>
+gitlab_host_ip: 10.0.0.45
+
+gitlab_major_version: "19"
+
+postgres_version: "17"
+
+postgres_host: "10.0.0.43"
+postgres_port: 5432
+
+postgres_listen_address: "10.0.0.43"
+postgres_allowed_clients:
+  - 10.0.0.45/32
+
+gitlab_db_name: gitlabhq_production
+gitlab_db_user: gitlab
+
+gitlab_root_email: lukasz.sedek@<your_domain>

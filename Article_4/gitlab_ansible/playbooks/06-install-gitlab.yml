@@ -1,0 +1,311 @@
+---
+- name: Install GitLab CE 19.x
+  hosts: gitlab
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  vars:
+    gitlab_major_version_effective: "{{ (gitlab_major_version | default(gitlab_version | default('19')) | string).split('.')[0] }}"
+
+  tasks:
+
+    # --------------------------------------------------
+    # Sanity checks
+    # --------------------------------------------------
+
+    - name: Assert Ubuntu 24.04 / noble
+      assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_release == "noble"
+        fail_msg: >
+          This playbook is intended for Ubuntu 24.04 LTS / noble.
+          Detected {{ ansible_distribution }} {{ ansible_distribution_version }}
+          / {{ ansible_distribution_release }}.
+        success_msg: "Ubuntu 24.04 LTS / noble detected"
+
+    - name: Assert GitLab major version is 19
+      assert:
+        that:
+          - gitlab_major_version_effective == "19"
+        fail_msg: >
+          GitLab major version must be 19 for this playbook.
+          Detected gitlab_major_version_effective={{ gitlab_major_version_effective }}.
+        success_msg: "GitLab major version 19 selected"
+
+    - name: Assert PostgreSQL major version is 17
+      assert:
+        that:
+          - postgres_version == "17"
+        fail_msg: >
+          GitLab 19.x requires PostgreSQL 17.x.
+          Detected postgres_version={{ postgres_version }}.
+        success_msg: "PostgreSQL 17 selected"
+
+    # --------------------------------------------------
+    # Dependencies
+    # --------------------------------------------------
+
+    - name: Install prerequisite packages
+      apt:
+        name:
+          - curl
+          - ca-certificates
+          - tzdata
+          - perl
+          - gnupg
+          - apt-transport-https
+          - postgresql-client
+        state: present
+        update_cache: true
+
+    # --------------------------------------------------
+    # GitLab repository
+    # --------------------------------------------------
+
+    - name: Create keyring directory
+      file:
+        path: /usr/share/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Install GitLab GPG key
+      shell: |
+        curl -fsSL https://packages.gitlab.com/gpg.key \
+        | gpg --dearmor \
+        -o /usr/share/keyrings/gitlab.gpg
+      args:
+        creates: /usr/share/keyrings/gitlab.gpg
+
+    - name: Configure GitLab CE repository for Ubuntu 24.04 noble
+      copy:
+        dest: /etc/apt/sources.list.d/gitlab_gitlab-ce.list
+        mode: "0644"
+        content: |
+          deb [signed-by=/usr/share/keyrings/gitlab.gpg] https://packages.gitlab.com/gitlab/gitlab-ce/ubuntu/ noble main
+
+    - name: Update apt cache
+      apt:
+        update_cache: true
+
+    # --------------------------------------------------
+    # Discover latest GitLab 19.x package
+    # --------------------------------------------------
+
+    - name: Query available GitLab CE 19.x versions
+      shell: |
+        apt-cache madison gitlab-ce \
+        | awk '{print $3}' \
+        | grep -E '^{{ gitlab_major_version_effective }}\.' \
+        | sort -V \
+        | tail -n 1
+      register: gitlab_target_version_query
+      changed_when: false
+
+    - name: Set selected GitLab version
+      set_fact:
+        gitlab_target_version: "{{ gitlab_target_version_query.stdout | trim }}"
+
+    - name: Assert GitLab 19.x package found
+      assert:
+        that:
+          - gitlab_target_version is defined
+          - gitlab_target_version | length > 0
+        fail_msg: "No GitLab {{ gitlab_major_version_effective }}.x package found in GitLab CE repository"
+        success_msg: "GitLab package found"
+
+    - name: Show selected GitLab version
+      debug:
+        msg: "Selected GitLab CE package: {{ gitlab_target_version }}"
+
+    # --------------------------------------------------
+    # Verify PostgreSQL before GitLab install
+    # --------------------------------------------------
+
+    - name: Verify PostgreSQL TCP connectivity
+      wait_for:
+        host: "{{ postgres_host }}"
+        port: "{{ postgres_port }}"
+        timeout: 10
+
+    - name: Verify PostgreSQL authentication
+      shell: |
+        PGPASSWORD='{{ vault_gitlab_db_password }}' \
+        psql \
+          --host={{ postgres_host }} \
+          --port={{ postgres_port }} \
+          --username={{ gitlab_db_user }} \
+          --dbname={{ gitlab_db_name }} \
+          --no-password \
+          --tuples-only \
+          --command="SELECT current_database();"
+      register: pg_test
+      changed_when: false
+      no_log: true
+
+    - name: Assert PostgreSQL connectivity
+      assert:
+        that:
+          - gitlab_db_name in pg_test.stdout
+        fail_msg: "GitLab VM cannot connect to PostgreSQL database"
+        success_msg: "PostgreSQL connectivity verified"
+
+    - name: Verify PostgreSQL server major version
+      shell: |
+        PGPASSWORD='{{ vault_gitlab_db_password }}' \
+        psql \
+          --host={{ postgres_host }} \
+          --port={{ postgres_port }} \
+          --username={{ gitlab_db_user }} \
+          --dbname={{ gitlab_db_name }} \
+          --no-password \
+          --tuples-only \
+          --command="SHOW server_version;"
+      register: pg_server_version
+      changed_when: false
+      no_log: true
+
+    - name: Assert PostgreSQL server is 17.x
+      assert:
+        that:
+          - pg_server_version.stdout | trim is match('^' ~ postgres_version ~ '\.')
+        fail_msg: >
+          Expected PostgreSQL {{ postgres_version }}.x
+          but got {{ pg_server_version.stdout | trim }}.
+        success_msg: "PostgreSQL {{ postgres_version }}.x verified"
+
+    # --------------------------------------------------
+    # Pre-create GitLab config before package installation
+    # --------------------------------------------------
+
+    - name: Create /etc/gitlab directory
+      file:
+        path: /etc/gitlab
+        state: directory
+        mode: "0755"
+
+    - name: Configure gitlab.rb before package install
+      copy:
+        dest: /etc/gitlab/gitlab.rb
+        mode: "0600"
+        content: |
+          external_url '{{ gitlab_external_url }}'
+
+          letsencrypt['enable'] = false
+
+          gitlab_rails['nginx']['listen_port'] = 80
+          gitlab_rails['nginx']['listen_https'] = false
+
+          postgresql['enable'] = false
+
+          gitlab_rails['db_adapter'] = 'postgresql'
+          gitlab_rails['db_encoding'] = 'unicode'
+          gitlab_rails['db_host'] = '{{ postgres_host }}'
+          gitlab_rails['db_port'] = {{ postgres_port }}
+          gitlab_rails['db_database'] = '{{ gitlab_db_name }}'
+          gitlab_rails['db_username'] = '{{ gitlab_db_user }}'
+          gitlab_rails['db_password'] = '{{ vault_gitlab_db_password }}'
+
+          gitlab_rails['initial_root_password'] = '{{ vault_gitlab_root_password }}'
+          gitlab_rails['time_zone'] = 'Europe/Warsaw'
+
+          prometheus_monitoring['enable'] = false
+          registry['enable'] = false
+      no_log: true
+
+    # --------------------------------------------------
+    # Recover interrupted dpkg state if previous install failed
+    # --------------------------------------------------
+
+    - name: Recover interrupted package configuration if needed
+      command: dpkg --configure -a
+      register: dpkg_reconfigure
+      changed_when: false
+      failed_when: false
+
+    # --------------------------------------------------
+    # Install GitLab
+    # --------------------------------------------------
+
+    - name: Install pinned GitLab CE 19.x package
+      apt:
+        name: "gitlab-ce={{ gitlab_target_version }}"
+        state: present
+
+    # --------------------------------------------------
+    # Reconfigure GitLab
+    # --------------------------------------------------
+
+    - name: Run GitLab reconfigure
+      command: gitlab-ctl reconfigure
+      register: gitlab_reconfigure
+      changed_when: true
+
+    # --------------------------------------------------
+    # Validation
+    # --------------------------------------------------
+
+    - name: Wait for GitLab health endpoint
+      uri:
+        url: http://127.0.0.1/-/health
+        method: GET
+        status_code: 200
+        timeout: 30
+      register: gitlab_health
+      retries: 60
+      delay: 15
+      until: gitlab_health.status == 200
+
+    - name: Verify installed GitLab version
+      command: gitlab-rake gitlab:env:info
+      register: gitlab_env_info
+      changed_when: false
+
+    - name: Verify installed GitLab version
+      command: gitlab-rake gitlab:env:info
+      register: gitlab_env_info
+      changed_when: false
+
+    - name: Assert installed GitLab is 19.x
+      assert:
+        that:
+          - "'Version:' in gitlab_env_info.stdout"
+          - "'19.' in gitlab_env_info.stdout"
+        fail_msg: "Installed GitLab version is not 19.x"
+        success_msg: "Installed GitLab version is 19.x"
+
+    - name: Verify GitLab database connection
+      command: gitlab-rake gitlab:check SANITIZE=true
+      register: gitlab_check
+      changed_when: false
+
+    - name: Show GitLab check output
+      debug:
+        var: gitlab_check.stdout_lines
+
+    - name: Verify root user exists
+      command: gitlab-rails runner "puts User.find_by_username('root').present?"
+      register: gitlab_root_check
+      changed_when: false
+
+    - name: Assert root user exists
+      assert:
+        that:
+          - "'true' in gitlab_root_check.stdout"
+        fail_msg: "GitLab root user was not found"
+        success_msg: "GitLab root user exists"
+
+    - name: Show installation summary
+      debug:
+        msg:
+          - "GitLab CE {{ gitlab_target_version }} installed"
+          - "External PostgreSQL {{ postgres_version }}.x verified"
+          - "Database: {{ gitlab_db_name }}"
+          - "Database user: {{ gitlab_db_user }}"
+          - "External URL: {{ gitlab_external_url }}"
+          - "Root login: root"
+          - "Root password source: vault_gitlab_root_password"

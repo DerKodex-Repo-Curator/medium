@@ -1,0 +1,114 @@
+---
+- name: Prepare Linux servers for GitLab and PostgreSQL
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+
+    # --------------------------------------------------
+    # Repository metadata only
+    # --------------------------------------------------
+
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    # --------------------------------------------------
+    # Disable unattended upgrades
+    # --------------------------------------------------
+
+    - name: Remove unattended-upgrades
+      apt:
+        name: unattended-upgrades
+        state: absent
+
+    # --------------------------------------------------
+    # Base packages
+    # --------------------------------------------------
+
+    - name: Install common packages
+      apt:
+        name:
+          - curl
+          - wget
+          - gnupg
+          - ca-certificates
+          - apt-transport-https
+          - software-properties-common
+          - unzip
+          - jq
+          - net-tools
+          - dnsutils
+          - htop
+          - git
+          - vim
+          - python3
+          - python3-pip
+          - python3-psycopg2
+        state: present
+
+
+    # --------------------------------------------------
+    # Swap
+    # --------------------------------------------------
+
+    - name: Disable swap immediately
+      command: swapoff -a
+      changed_when: false
+      failed_when: false
+
+    - name: Remove swap entries from fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\sswap\s+sw\s+.*)$'
+        replace: '# \1'
+
+    # --------------------------------------------------
+    # Sysctl tuning
+    # --------------------------------------------------
+
+    - name: Configure system tuning
+      copy:
+        dest: /etc/sysctl.d/99-gitlab.conf
+        mode: "0644"
+        content: |
+          vm.swappiness=1
+
+          fs.inotify.max_user_instances=8192
+          fs.inotify.max_user_watches=1048576
+
+          net.core.somaxconn=4096
+
+    - name: Apply sysctl configuration
+      command: sysctl --system
+      changed_when: false
+
+    # --------------------------------------------------
+    # Hostname resolution
+    # --------------------------------------------------
+
+    - name: Configure hosts file
+      blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE GITLAB"
+        block: |
+          10.0.0.43 gitlab-postgres.<your_domain> gitlab-postgres
+          10.0.0.45 gitlab.<your_domain> gitlab
+
+    # --------------------------------------------------
+    # Reboot if required
+    # --------------------------------------------------
+
+    - name: Check if reboot is required
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+
+    - name: Reboot if required
+      reboot:
+      when: reboot_required.stat.exists

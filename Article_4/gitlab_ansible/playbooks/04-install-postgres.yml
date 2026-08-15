@@ -1,0 +1,236 @@
+---
+- name: Install PostgreSQL 17
+  hosts: postgres
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+
+    # --------------------------------------------------
+    # PGDG Repository
+    # --------------------------------------------------
+
+    - name: Install repository prerequisites
+      apt:
+        name:
+          - curl
+          - ca-certificates
+          - gnupg
+        state: present
+        update_cache: true
+
+    - name: Create PGDG key directory
+      file:
+        path: /usr/share/postgresql-common/pgdg
+        state: directory
+        mode: "0755"
+
+    - name: Import PGDG signing key
+      shell: |
+        curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        | gpg --dearmor \
+        -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+      args:
+        creates: /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+
+    - name: Configure PGDG repository
+      copy:
+        dest: /etc/apt/sources.list.d/pgdg.list
+        mode: "0644"
+        content: |
+          deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main
+
+    - name: Update apt cache
+      apt:
+        update_cache: true
+
+    # --------------------------------------------------
+    # PostgreSQL
+    # --------------------------------------------------
+
+    - name: Install PostgreSQL {{ postgres_version }}
+      apt:
+        name:
+          - "postgresql-{{ postgres_version }}"
+          - "postgresql-client-{{ postgres_version }}"
+          - postgresql-contrib
+        state: present
+
+    - name: Enable PostgreSQL
+      service:
+        name: postgresql
+        state: started
+        enabled: true
+
+    # --------------------------------------------------
+    # PostgreSQL configuration
+    # --------------------------------------------------
+
+    - name: Configure postgresql.conf
+      blockinfile:
+        path: "/etc/postgresql/{{ postgres_version }}/main/postgresql.conf"
+        marker: "# {mark} ANSIBLE GITLAB"
+        block: |
+          listen_addresses = '*'
+
+          max_connections = 500
+
+          shared_buffers = 1GB
+          effective_cache_size = 3GB
+          maintenance_work_mem = 256MB
+
+          wal_level = replica
+          max_wal_size = 2GB
+          min_wal_size = 512MB
+      notify: restart postgresql
+
+    - name: Configure pg_hba.conf
+      copy:
+        dest: "/etc/postgresql/{{ postgres_version }}/main/pg_hba.conf"
+        mode: "0640"
+        content: |
+          local   all             postgres                                peer
+          local   all             all                                     peer
+
+          host    all             all             127.0.0.1/32            scram-sha-256
+          host    all             all             ::1/128                 scram-sha-256
+
+          host    all             all             {{ gitlab_host_ip }}/32  scram-sha-256
+      notify: restart postgresql
+
+    - name: Flush handlers
+      meta: flush_handlers
+
+    # --------------------------------------------------
+    # postgres password
+    # --------------------------------------------------
+
+    - name: Set postgres password
+      shell: |
+        sudo -u postgres psql -tAc "
+        SELECT 1
+        FROM pg_authid
+        WHERE rolname='postgres';
+        "
+
+        sudo -u postgres psql -c "
+        ALTER USER postgres
+        WITH PASSWORD '{{ vault_postgres_superuser_password }}';
+        "
+      changed_when: false
+
+    # --------------------------------------------------
+    # GitLab role
+    # --------------------------------------------------
+
+    - name: Create GitLab role
+      shell: |
+        sudo -u postgres psql -tAc "
+        SELECT 1
+        FROM pg_roles
+        WHERE rolname='{{ gitlab_db_user }}';
+        " | grep -q 1 || \
+        sudo -u postgres psql -c "
+        CREATE ROLE {{ gitlab_db_user }}
+        LOGIN
+        PASSWORD '{{ vault_gitlab_db_password }}';
+        "
+      changed_when: false
+
+    # --------------------------------------------------
+    # GitLab database
+    # --------------------------------------------------
+
+    - name: Create GitLab database
+      shell: |
+        sudo -u postgres psql -tAc "
+        SELECT 1
+        FROM pg_database
+        WHERE datname='{{ gitlab_db_name }}';
+        " | grep -q 1 || \
+        sudo -u postgres psql -c "
+        CREATE DATABASE {{ gitlab_db_name }}
+        OWNER {{ gitlab_db_user }}
+        ENCODING 'UTF8';
+        "
+      changed_when: false
+
+    # --------------------------------------------------
+    # Verification
+    # --------------------------------------------------
+
+    - name: Check PostgreSQL version
+      command: psql --version
+      register: postgres_version_output
+      changed_when: false
+
+    - name: Show PostgreSQL version
+      debug:
+        var: postgres_version_output.stdout
+
+    - name: Verify PostgreSQL major version
+      assert:
+        that:
+          - postgres_version in postgres_version_output.stdout
+        fail_msg: >
+          Expected PostgreSQL {{ postgres_version }}
+          but found {{ postgres_version_output.stdout }}
+
+    - name: Verify GitLab role exists
+      shell: |
+        sudo -u postgres psql -tAc "
+        SELECT rolname
+        FROM pg_roles
+        WHERE rolname='{{ gitlab_db_user }}';
+        "
+      register: gitlab_role_check
+      changed_when: false
+
+    - name: Assert GitLab role exists
+      assert:
+        that:
+          - gitlab_db_user in gitlab_role_check.stdout
+
+    - name: Verify GitLab database exists
+      shell: |
+        sudo -u postgres psql -tAc "
+        SELECT datname
+        FROM pg_database
+        WHERE datname='{{ gitlab_db_name }}';
+        "
+      register: gitlab_db_check
+      changed_when: false
+
+    - name: Assert GitLab database exists
+      assert:
+        that:
+          - gitlab_db_name in gitlab_db_check.stdout
+
+    - name: Verify PostgreSQL readiness
+      command: pg_isready
+      register: pg_ready
+      changed_when: false
+
+    - name: Assert PostgreSQL is ready
+      assert:
+        that:
+          - pg_ready.rc == 0
+
+    - name: Show PostgreSQL status
+      debug:
+        msg:
+          - "PostgreSQL {{ postgres_version }}"
+          - "Database {{ gitlab_db_name }}"
+          - "User {{ gitlab_db_user }}"
+          - "Ready for GitLab 19"
+
+  handlers:
+
+    - name: restart postgresql
+      service:
+        name: postgresql
+        state: restarted

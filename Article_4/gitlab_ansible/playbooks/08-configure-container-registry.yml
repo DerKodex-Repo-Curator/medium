@@ -1,0 +1,52 @@
+---
+- name: Enable GitLab Container Registry
+  hosts: gitlab
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+
+    - name: Configure Container Registry
+      blockinfile:
+        path: /etc/gitlab/gitlab.rb
+        marker: "# {mark} ANSIBLE CONTAINER REGISTRY"
+        block: |
+
+          registry_external_url 'https://cr.<your_domain>'
+
+          registry['enable'] = true
+
+          registry_nginx['listen_https'] = false
+          registry_nginx['listen_port'] = 5050
+
+          gitlab_rails['registry_enabled'] = true
+          gitlab_rails['registry_host'] = 'cr.<your_domain>'
+          gitlab_rails['registry_port'] = 443
+      notify:
+        - reconfigure gitlab
+
+    - name: Flush handlers
+      meta: flush_handlers
+
+    - name: Wait for Puma
+      shell: gitlab-ctl status puma
+      register: puma_status
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: "'run:' in puma_status.stdout"
+
+    - name: Display summary
+      debug:
+        msg:
+          - "Container Registry enabled"
+          - "Registry URL: https://cr.<your_domain>"
+          - "Registry backend port: 5050"
+
+  handlers:
+
+    - name: reconfigure gitlab
+      command: gitlab-ctl reconfigure

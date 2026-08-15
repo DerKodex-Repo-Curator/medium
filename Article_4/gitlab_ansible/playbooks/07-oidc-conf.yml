@@ -1,0 +1,91 @@
+---
+- name: Configure GitLab OIDC with Authentik
+  hosts: gitlab
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+
+    - name: Configure OIDC provider
+      blockinfile:
+        path: /etc/gitlab/gitlab.rb
+        marker: "# {mark} ANSIBLE AUTHENTIK OIDC"
+        block: |
+
+          gitlab_rails['omniauth_enabled'] = true
+
+          gitlab_rails['omniauth_allow_single_sign_on'] = ['openid_connect']
+
+          gitlab_rails['omniauth_auto_link_user'] = ['openid_connect']
+
+          gitlab_rails['omniauth_block_auto_created_users'] = false
+
+          gitlab_rails['omniauth_auto_link_saml_user'] = false
+
+          gitlab_rails['omniauth_providers'] = [
+            {
+              name: "openid_connect",
+              label: "Authentik",
+              args: {
+
+                name: "openid_connect",
+
+                scope: ["openid", "profile", "email"],
+
+                response_type: "code",
+
+                issuer: "https://auth.<your_domain>/application/o/gitlab/",
+
+                discovery: true,
+
+                uid_field: "email",
+
+                pkce: true,
+
+                client_auth_method: "query",
+
+                client_options: {
+                  identifier: "{{ vault_gitlab_oidc_client_id }}",
+                  secret: "{{ vault_gitlab_oidc_client_secret }}",
+                  redirect_uri: "https://gitlab.<your_domain>/users/auth/openid_connect/callback"
+                }
+              }
+            }
+          ]
+      no_log: true
+      notify:
+        - reconfigure gitlab
+
+    - name: Flush handlers
+      meta: flush_handlers
+
+    - name: Wait for GitLab health endpoint
+      uri:
+        url: http://127.0.0.1/-/health
+        status_code: 200
+      register: gitlab_health
+      retries: 30
+      delay: 10
+      until: gitlab_health.status == 200
+
+    - name: Verify omniauth config
+      command: gitlab-rake gitlab:env:info
+      register: gitlab_env
+      changed_when: false
+
+    - name: Show GitLab status
+      debug:
+        msg:
+          - "OIDC configured"
+          - "Issuer: https://auth.<your_domain>/application/o/gitlab/"
+          - "Redirect URI: https://gitlab.<your_domain>/users/auth/openid_connect/callback"
+          - "Provider label: Authentik"
+
+  handlers:
+
+    - name: reconfigure gitlab
+      command: gitlab-ctl reconfigure
